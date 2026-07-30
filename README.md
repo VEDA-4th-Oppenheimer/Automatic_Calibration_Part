@@ -90,4 +90,4 @@ docker compose exec -T dev /workspace-build/render_calibration_visualization \
 - `visualization_summary.json`
 - `pointcloud_lidar.ply` / `pointcloud_lidar.obj` (lidar_scan 좌표계)
 - `pointcloud_calibrated_camera.ply` / `pointcloud_calibrated_camera.obj` (camera_optical 좌표계)
-# Automatic_Calibration_Part
+
