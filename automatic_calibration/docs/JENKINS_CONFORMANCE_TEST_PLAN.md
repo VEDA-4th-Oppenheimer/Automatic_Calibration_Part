@@ -16,6 +16,12 @@ Stanford 2D-3D-S 기반 합성 pan-tilt LiDAR 데이터로 Calibration Core를
 
 OpenSDK/CV5 빌드 및 실기기 호환성은 이 Jenkins job의 범위에서 제외한다.
 
+Yaw/down coarse 간격, 인접 후보 보정 및 1° fine search의 주기별 성능 시험은
+[Orientation Search Step Size Test Plan](ORIENTATION_SEARCH_STEP_SIZE_TEST_PLAN.md)을
+기준으로 구성한다. 해당 시험은 1°×1° full-search baseline이
+`FULL_SEARCH_BASELINE_PASS`인 경우에만 실행하며, 실패 시 step-size stage를
+`BLOCKED_BY_FULL_SEARCH_BASELINE`으로 종료한다.
+
 ## 2. 권장 Jenkins 구성
 
 ### 2.1 Jenkins node
@@ -278,6 +284,9 @@ controller timezone을 기준으로 환산하고 실제 첫 실행 시각을 확
 | D-010 | Determinism | 고정 seed 2회 |
 | D-011 | Output integrity | PCD/EXR/PNG/JSON/YAML 존재 및 parse |
 | D-012 | Runtime regression | 최근 baseline 대비 허용 범위 |
+| D-013 | Geometry NID path | geometry point/NID projection/finite score |
+| D-014 | 180° heading recovery | 360° yaw multi-start synthetic positive |
+| D-015 | NID fail-safe reason | overlap/improvement/ambiguity 기대 FAIL 코드 |
 
 권장 dataset: 10~20개 curated frame.
 
@@ -309,6 +318,9 @@ triggers {
 | W-012 | Docker rebuild | no-cache 또는 base image validation |
 
 ### 5.4 Monthly test
+| W-013 | Yaw multi-start sweep | 0~345° 초기 heading, 15° 간격 |
+| W-014 | NID observability | texture/geometry entropy 및 후보 margin 분포 |
+| W-015 | Independent hold-out | 최적화 미사용 frame 재투영 검증 |
 
 권장 시간: 매월 첫째 일요일.
 
@@ -340,6 +352,7 @@ Release tag 또는 수동 승인 후 실행한다.
 | R-004 | Calibration accuracy gate | 승인된 threshold |
 | R-005 | Known failure behavior | 기대 FAIL reason 일치 |
 | R-006 | Report completeness | JUnit/JSON/plots/artifacts |
+| R-008 | False-PASS regression | session-003/130333 historical 후보가 PASS되지 않음 |
 | R-007 | Reproducibility rerun | 동일 결과 |
 
 ## 6. Jenkins job 구성
@@ -477,7 +490,7 @@ pipeline {
                     sh '''
                         # conformance runner 구현 후 사용:
                         # docker compose exec -T dev \
-                        #   /workspace-build/run_conformance \
+                        #   /workspace-build/bin/run_conformance \
                         #   --suite /workspace/conformance/suites/${SUITE}.yaml \
                         #   --dataset /datasets/stanford2d3ds/area_1 \
                         #   --output /workspace/build-output/${BUILD_NUMBER}
@@ -486,7 +499,7 @@ pipeline {
                         OPENCV_IO_ENABLE_OPENEXR=1 \
                         docker compose exec -T \
                           -e OPENCV_IO_ENABLE_OPENEXR=1 dev \
-                          /workspace-build/generate_synthetic_scan \
+                          /workspace-build/bin/generate_synthetic_scan \
                           --dataset-root \
                             /datasets/stanford2d3ds/area_1 \
                           --output \
@@ -550,6 +563,13 @@ build-output/<build-number>/
   "translation_error_m": null,
   "rotation_error_deg": null,
   "valid_ratio": 0.64,
+  "lidar_geometry_points": 11063,
+  "nid_projected_points": 10546,
+  "initial_nid": 0.98985,
+  "final_nid": 0.98938,
+  "composite_objective_improvement_ratio": 0.002945,
+  "multistart_candidates": 8,
+  "multistart_objective_margin": 0.02,
   "runtime_ms": 120,
   "peak_rss_mb": 180,
   "input_hash": "",
@@ -559,8 +579,9 @@ build-output/<build-number>/
 }
 ```
 
-Calibration optimizer가 구현되기 전에는 accuracy 필드를 `null`로 두고 생성,
-schema, topology와 determinism만 판정한다.
+Synthetic ground truth가 없는 실제 데이터는 accuracy 필드를 `null`로 두되 NID,
+복합 목적함수, projected ratio, multi-start margin과 reason code를 반드시 기록한다.
+`PASS`는 독립 reference 또는 hold-out 검증 전까지 배포 승인과 동일하게 취급하지 않는다.
 
 ## 9. 보존과 cleanup 정책
 

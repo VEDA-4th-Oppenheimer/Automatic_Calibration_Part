@@ -1,0 +1,33 @@
+# Local/editor state
+.DS_Store
+.vscode/
+.idea/
+.env
+.env.*
+!.env.example
+
+# Native build trees
+build/
+**/build/
+
+# Local Docker-only development files
+Dockerfile
+compose.yaml
+.dockerignore
+
+# Generated results and captured/large datasets
+automatic_calibration/generated/
+manual_calibration/data/
+manual_calibration/output/
+data/
+archive/
+generated/
+
+# Point-cloud and mesh exports are reproducible artifacts, not source inputs
+*.pcd
+*.ply
+*.obj
+
+# Python cache
+__pycache__/
+*.py[cod]

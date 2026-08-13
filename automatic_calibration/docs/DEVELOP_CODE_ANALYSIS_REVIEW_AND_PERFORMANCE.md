@@ -621,30 +621,30 @@ ASCII PCD가 주된 확장 요인이다. 장기 conformance 결과를 보존할 
 
 ## 10. 재현 명령
 
-`develop/`에서 실행한다.
+`develop/`에서 Ubuntu native로 실행한다. 의존성이 없다면 먼저
+`./scripts/install-ubuntu-deps.sh`를 한 번 실행한다.
 
 ```bash
-docker compose exec -T dev cmake \
-  -S /workspace -B /workspace-build -G Ninja \
+cmake \
+  -S . -B build -G Ninja \
   -DCMAKE_BUILD_TYPE=RelWithDebInfo
-docker compose exec -T dev cmake --build /workspace-build --parallel 2
-docker compose exec -T dev ctest \
-  --test-dir /workspace-build --output-on-failure
+cmake --build build --parallel 2
+ctest --test-dir build --output-on-failure
 ```
 
 단일 장면:
 
 ```bash
-docker compose exec -T dev /workspace-build/run_synthetic_calibration \
-  --dataset-root /datasets/stanford2d3ds/area_1 \
+build/bin/run_synthetic_calibration \
+  --dataset-root /path/to/area_1 \
   --output /tmp/auto_calib_single
 ```
 
 5장면:
 
 ```bash
-docker compose exec -T dev /workspace-build/run_multi_synthetic_calibration \
-  --dataset-root /datasets/stanford2d3ds/area_1 \
+build/bin/run_multi_synthetic_calibration \
+  --dataset-root /path/to/area_1 \
   --output /tmp/auto_calib_multi \
   --frame-ids \
 camera_0004591bfdc749a88db196a5d8b345cb_office_6_frame_0,camera_00d10d86db1e435081a837ced388375f_office_24_frame_0,camera_03eb3fa2e1524ee887ba22d1a4896f3c_WC_1_frame_0,camera_042a479869b44a7c9159922f19a285ea_conferenceRoom_1_frame_0,camera_042fab82b3a94af9bea3c80984bc2583_hallway_2_frame_0

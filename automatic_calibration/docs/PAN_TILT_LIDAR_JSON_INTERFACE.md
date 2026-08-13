@@ -22,23 +22,51 @@ TOFSense F2P와 pan-tilt actuator 담당 팀이 Calibration Core 팀에 전달�
 
 ## 좌표계
 
-`lidar_scan` 좌표계는 다음과 같다.
+외부 JSON의 `frame` 객체가 측정 좌표계의 기준이다.
 
 ```text
 +x: right
 +y: down
 +z: forward
 pan positive: right
-tilt positive: up
+measurement tilt positive: up
 ```
 
-거리와 각도로부터 point를 계산하는 식:
+`measurements[].tilt_rad`는 계약각이다. `mechanism.tilt_zero`는 모터 기구축의 홈 의미이며,
+계약각의 원점을 정의하지 않는다.
+
+```text
+measurement tilt=0°   : 수평 전방(+z)
+measurement tilt=-90° : 수직 아래(+y), 천장 설치 시 바닥
+measurement range     : -90° ~ 0° (130333 실측)
+```
+
+거리와 계약각으로부터 내부 `lidar_scan` point를 계산하는 식:
 
 ```text
 x = range * cos(tilt) * sin(pan)
 y = -range * sin(tilt)
 z = range * cos(tilt) * cos(pan)
 ```
+
+JSON의 `pan_rad`, `tilt_rad`, `distance_m`은 위 식의 `pan`, `tilt`, `range`로 해석한다.
+`mechanism.tilt_zero=nadir`를 보고 계약각의 0°가 nadir라고 해석하면 안 된다.
+실장 확인 결과 pan 값 증가는 Top-view 기준 시계 방향이며, JSON의 `pan+ right`
+계약과 함께 사용한다.
+
+카메라 중심 offset은 LiDAR JSON 필드가 아니다. 원점은 팬/틸트 축 교점이며, 카메라 중심과의
+상대 위치는 외부 파라미터 `t_camera_lidar`가 추정할 대상이다. `range_offset_m`은 축교점과
+LiDAR 발광면의 거리 보정으로 point range에만 적용한다.
+
+PLY/OBJ는 내부 `lidar_scan` 좌표계와 mm 단위로 export하며, 계산 내부 단위는 meter다. viewer용 파일은 다음 표시 변환만
+적용한다.
+
+```text
+viewer_z_up = (lidar_x, lidar_z, -lidar_y)
+```
+
+외부 ICD에서 별도 표기하는 `x_icd=d*cos(phi)*cos(theta)` 식을 사용할 경우에는 그 좌표계와
+현재 `lidar_scan` 좌표계를 별도 이름으로 유지해야 하며, 두 식을 동일한 식으로 문서화하지 않는다.
 
 organized scan ordering:
 
@@ -141,9 +169,29 @@ calib-20260729-001_sweep-000001_pan_tilt_lidar.json
 
 JSON은 인터페이스 검증, replay, 장애 분석용 기준 포맷이다. 실제 고속 연속 운용에서 파일 크기나 parsing 시간이 문제가 되면 동일 field 계약을 유지한 PCD/Protobuf/MCAP을 추가할 수 있다. 포맷을 변경하더라도 JSON을 golden reference로 유지한다.
 
+### 향후 권장 메타데이터 — 현재 구현의 선행조건 아님 (2026-08-12)
+
+현재 schema 1.1 실측 데이터의 `pan_rad`, `tilt_rad`, `distance_m`은 Calibration
+Core 입력으로 사용할 수 있다. 다음 필드는 지금 즉시 추가하거나 기존 JSON을 수정해야
+하는 필수사항이 아니며, 이후 producer schema를 정리할 때 자체 설명성과 장애 분석성을
+높이기 위한 권장사항으로만 관리한다.
+
+- `sensor.range_offset_m`
+- `frame.origin`, `frame.range_formula`
+- `frame.pan_positive_direction = clockwise_top_view`
+- `frame.pan_zero_reference = mechanical_home`
+- pan 영점 보정이 `measurements[].pan_rad`에 이미 반영됐는지 나타내는 명시적 상태
+
+현재 오정합은 위 메타데이터 부재가 직접 원인이 아니므로 producer 변경을 기다리지 않고
+Calibration Core 목적함수의 가시성 및 구조선 대응을 먼저 수정한다.
+
 ## 수정 로그
 
 | 버전 | 수정일 | 수정 내용 |
 |---|---|---|
 | 1.0 | 2026-07-29 | TOFSense F2P, encoder, timestamp, organized scan, diagnostics를 포함하는 최초 JSON 계약 |
 | 1.0.1 | 2026-07-29 | 계획서와 단위·필드명을 통일하고 firmware-to-canonical 변환 규칙 명시 |
+
+## 수정 로그 추가 (2026-08-12)
+
+`mechanism.tilt_zero=nadir`는 기구축 홈 메타데이터이고 `measurements[].tilt_rad`는 좌표식에 사용하는 계약각임을 명시했다. 계약각은 0° 수평, 음수 아래 방향으로 처리하며, `tilt_zero` 필드만 보고 +90° 보정하지 않는다. 카메라 중심 offset은 JSON에 넣지 않고 외부 파라미터 추정 대상으로 분리했다.

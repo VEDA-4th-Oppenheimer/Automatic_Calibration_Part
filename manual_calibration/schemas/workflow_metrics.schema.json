@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/calibration/workflow-metrics.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "session_id", "method", "operator_count", "setup_seconds", "capture_seconds", "compute_seconds", "retry_count", "success"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "session_id": {"type": "string", "minLength": 1},
+    "method": {"enum": ["manual_marker_2d_image", "automatic_targetless_lidar"]},
+    "operator_count": {"type": "integer", "minimum": 1},
+    "setup_seconds": {"type": "number", "minimum": 0},
+    "capture_seconds": {"type": "number", "minimum": 0},
+    "compute_seconds": {"type": "number", "minimum": 0},
+    "input_count": {"type": "integer", "minimum": 0},
+    "retry_count": {"type": "integer", "minimum": 0},
+    "target_required": {"type": "boolean"},
+    "success": {"type": "boolean"},
+    "notes": {"type": "string"}
+  }
+}

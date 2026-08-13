@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "method": "charuco_2d_image_only_pose",
+  "status": "PASS",
+  "extrinsic": {
+    "parent_frame": "camera_optical",
+    "child_frame": "marker_board",
+    "convention": "p_parent = R_parent_child * p_child + t_parent_child",
+    "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    "translation_m": [0.0, 0.0, 3.0]
+  }
+}

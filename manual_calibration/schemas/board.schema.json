@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/manual-calibration/board.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "board"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "board": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dictionary", "squares_x", "squares_y", "square_length_m", "marker_length_m", "legacy_pattern", "minimum_charuco_corners"],
+      "properties": {
+        "dictionary": {"enum": ["DICT_4X4_50", "DICT_4X4_100", "DICT_5X5_50", "DICT_5X5_100", "DICT_5X5_250", "DICT_6X6_100", "DICT_6X6_250", "DICT_7X7_250", "DICT_ARUCO_ORIGINAL"]},
+        "squares_x": {"type": "integer", "minimum": 3},
+        "squares_y": {"type": "integer", "minimum": 3},
+        "square_length_m": {"type": "number", "exclusiveMinimum": 0},
+        "marker_length_m": {"type": "number", "exclusiveMinimum": 0},
+        "legacy_pattern": {"type": "boolean"},
+        "minimum_charuco_corners": {"type": "integer", "minimum": 4}
+      }
+    }
+  }
+}

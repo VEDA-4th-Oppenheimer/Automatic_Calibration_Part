@@ -1,0 +1,12 @@
+{
+  "schema_version": "1.0",
+  "method": "targetless_automatic",
+  "status": "PASS",
+  "estimated": {
+    "parent_frame": "camera_optical",
+    "child_frame": "lidar_scan",
+    "convention": "p_parent = R_parent_child * p_child + t_parent_child",
+    "rotation_matrix": [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+    "translation_m": [0.0, 0.0, 0.0]
+  }
+}

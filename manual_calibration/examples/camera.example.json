@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "camera": {
+    "model": "PNM-C16083RVQ",
+    "resolution": [1400, 1000],
+    "intrinsic_profile_id": "example-only",
+    "intrinsic": {"fx": 1200.0, "fy": 1200.0, "cx": 700.0, "cy": 500.0},
+    "distortion_model": "opencv_radtan",
+    "distortion": [0.0, 0.0, 0.0, 0.0, 0.0]
+  }
+}
