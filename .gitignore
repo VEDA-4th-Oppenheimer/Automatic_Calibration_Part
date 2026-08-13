@@ -19,7 +19,7 @@ compose.yaml
 automatic_calibration/generated/
 manual_calibration/data/
 manual_calibration/output/
-data/
+data/*
 archive/
 generated/
 
@@ -31,3 +31,11 @@ generated/
 # Python cache
 __pycache__/
 *.py[cod]
+
+# Small, intentional smoke-test sample (raw datasets remain ignored)
+!data/real_calibration/
+data/real_calibration/*
+!data/real_calibration/session-const-env/
+data/real_calibration/session-const-env/*
+!data/real_calibration/session-const-env/sample_data/
+!data/real_calibration/session-const-env/sample_data/**
