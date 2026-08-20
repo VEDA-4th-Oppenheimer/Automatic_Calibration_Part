@@ -40,7 +40,8 @@ struct Point {
   Eigen::Vector3f xyz =
       Eigen::Vector3f::Constant(std::numeric_limits<float>::quiet_NaN());
   float range = std::numeric_limits<float>::quiet_NaN(),
-        precision = std::numeric_limits<float>::quiet_NaN();
+        precision = std::numeric_limits<float>::quiet_NaN(),
+        signal_strength = std::numeric_limits<float>::quiet_NaN();
   float pan = 0, tilt = 0;
   std::int64_t timestamp = 0;
   std::uint32_t row = 0, column = 0, flags = 0;

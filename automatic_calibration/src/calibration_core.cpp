@@ -9,14 +9,24 @@
 #include <Eigen/Eigenvalues>
 #include <limits>
 #include <map>
+#include <numeric>
 #include <opencv2/imgproc.hpp>
 #include <stdexcept>
+#include <tuple>
 
 namespace auto_calib {
 namespace {
 constexpr double kRadToDeg = 57.295779513082320876;
 using Parameters = std::array<double, 6>;
 using Intrinsics = std::array<double, 4>;
+bool validLidarEdgeConfig(const CalibrationConfig &config) {
+  return std::isfinite(config.lidar_edge_absolute_threshold_m) &&
+         config.lidar_edge_absolute_threshold_m >= 0.0 &&
+         std::isfinite(config.lidar_edge_relative_threshold) &&
+         config.lidar_edge_relative_threshold >= 0.0 &&
+         std::isfinite(config.lidar_edge_minimum_local_contrast_ratio) &&
+         config.lidar_edge_minimum_local_contrast_ratio >= 1.0;
+}
 Parameters toParameters(const Transform &t) {
   Eigen::AngleAxisd aa(t.rotation);
   Eigen::Vector3d v = aa.angle() * aa.axis();
@@ -70,21 +80,31 @@ double residualForPoint(const double *p, const Eigen::Vector3d &point,
 struct GeometryFeature {
   Eigen::Vector3d point;
   Eigen::Vector3d tangent = Eigen::Vector3d::Zero();
-  double value = 0.0;
+  double range_value = 0.0;
+  double normal_value = 0.0;
 };
 struct NidEvaluation {
   double score = 1.0;
   double squared_score = 1.0;
+  double range_score = -1.0;
+  double normal_score = -1.0;
+  double range_entropy_ratio = 0.0;
+  double normal_entropy_ratio = 0.0;
   std::size_t projected = 0;
+  std::size_t active_spatial_cells = 0;
 };
 struct Evaluation {
   double normalized_squared = std::numeric_limits<double>::infinity();
   double mean = std::numeric_limits<double>::infinity();
   std::size_t projected = 0, in_frame = 0, visible = 0, occluded = 0;
+  std::size_t active_spatial_cells = 0;
   double horizontal_normalized_squared =
       std::numeric_limits<double>::infinity();
   double vertical_normalized_squared = std::numeric_limits<double>::infinity();
   std::size_t horizontal_visible = 0, vertical_visible = 0;
+  std::size_t horizontal_projected = 0, vertical_projected = 0;
+  double score_weight = 0.0, horizontal_score_weight = 0.0,
+         vertical_score_weight = 0.0;
 };
 cv::Mat buildCameraGradientFeature(const cv::Mat &bgr) {
   cv::Mat gray;
@@ -103,6 +123,17 @@ cv::Mat buildCameraGradientFeature(const cv::Mat &bgr) {
   magnitude /= std::max(1e-6, mean[0] + 3.0 * deviation[0]);
   cv::threshold(magnitude, magnitude, 1.0, 1.0, cv::THRESH_TRUNC);
   return magnitude;
+}
+cv::Mat buildCameraIntensityFeature(const cv::Mat &bgr) {
+  cv::Mat gray;
+  if (bgr.channels() == 3)
+    cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
+  else
+    gray = bgr;
+  cv::Mat intensity;
+  gray.convertTo(intensity, CV_32F, 1.0 / 255.0);
+  cv::GaussianBlur(intensity, intensity, {3, 3}, 0.8);
+  return intensity;
 }
 bool projectPoint(const double *p, const Eigen::Vector3d &point,
                   const CameraModel &camera, const double *intrinsics,
@@ -181,6 +212,25 @@ struct StructuralImageFeature {
   std::vector<ImageLineSegment> segments;
   std::size_t line_count = 0;
 };
+struct VanishingDirection {
+  Eigen::Vector3d camera_direction = Eigen::Vector3d::Zero();
+  std::size_t inliers = 0;
+  double mean_residual = 1.0;
+};
+struct ManhattanImageFeature {
+  VanishingDirection vertical;
+  std::vector<VanishingDirection> horizontal;
+};
+struct ManhattanLidarFeature {
+  std::vector<Eigen::Vector3d> horizontal_directions;
+};
+struct ManhattanEvaluation {
+  double score = 1.0;
+  double vertical_error_rad = std::numeric_limits<double>::infinity();
+  double horizontal_error_rad = std::numeric_limits<double>::infinity();
+  std::size_t vertical_inliers = 0;
+  std::size_t horizontal_axes = 0;
+};
 StructuralImageFeature buildStructuralLineDistance(
     const cv::Mat &bgr, const CalibrationConfig &config) {
   cv::Mat gray;
@@ -230,6 +280,217 @@ StructuralImageFeature buildStructuralLineDistance(
   return {std::move(distances), std::move(retained_segments), retained};
 }
 
+std::vector<VanishingDirection> detectVanishingDirections(
+    const StructuralImageFeature &lines, const CameraModel &camera,
+    const CalibrationConfig &config) {
+  std::vector<std::size_t> order(lines.segments.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+    return lines.segments[a].length > lines.segments[b].length;
+  });
+  if (order.size() > config.maximum_manhattan_image_lines)
+    order.resize(config.maximum_manhattan_image_lines);
+  std::vector<Eigen::Vector3d> planes;
+  planes.reserve(order.size());
+  for (const auto index : order) {
+    const auto &line = lines.segments[index];
+    const Eigen::Vector3d a(line.a.x, line.a.y, 1.0);
+    const Eigen::Vector3d b(line.b.x, line.b.y, 1.0);
+    Eigen::Vector3d plane = camera.k.transpose() * a.cross(b);
+    if (plane.norm() > 1e-9)
+      planes.push_back(plane.normalized());
+  }
+  const double inlier_threshold =
+      std::sin(config.manhattan_vanishing_inlier_threshold_rad);
+  std::vector<VanishingDirection> candidates;
+  for (std::size_t first = 0; first < planes.size(); ++first)
+    for (std::size_t second = first + 1; second < planes.size(); ++second) {
+      Eigen::Vector3d direction = planes[first].cross(planes[second]);
+      if (direction.norm() <= 1e-6)
+        continue;
+      direction.normalize();
+      std::vector<std::size_t> inliers;
+      for (std::size_t line = 0; line < planes.size(); ++line)
+        if (std::abs(planes[line].dot(direction)) <= inlier_threshold)
+          inliers.push_back(line);
+      if (inliers.size() < config.minimum_manhattan_vanishing_inliers)
+        continue;
+      Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+      for (const auto line : inliers)
+        covariance += planes[line] * planes[line].transpose();
+      Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+      if (solver.info() != Eigen::Success)
+        continue;
+      direction = solver.eigenvectors().col(0).normalized();
+      std::size_t refined_inliers = 0;
+      double residual = 0.0;
+      for (const auto &plane : planes) {
+        const double value = std::abs(plane.dot(direction));
+        if (value <= inlier_threshold) {
+          ++refined_inliers;
+          residual += value;
+        }
+      }
+      if (refined_inliers >= config.minimum_manhattan_vanishing_inliers)
+        candidates.push_back(
+            {direction, refined_inliers, residual / refined_inliers});
+    }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const VanishingDirection &a, const VanishingDirection &b) {
+              return a.inliers != b.inliers ? a.inliers > b.inliers
+                                            : a.mean_residual < b.mean_residual;
+            });
+  std::vector<VanishingDirection> result;
+  const double duplicate_cosine =
+      std::cos(config.manhattan_vanishing_separation_rad);
+  for (const auto &candidate : candidates) {
+    if (std::any_of(result.begin(), result.end(), [&](const auto &accepted) {
+          return std::abs(candidate.camera_direction.dot(
+                     accepted.camera_direction)) >= duplicate_cosine;
+        }))
+      continue;
+    result.push_back(candidate);
+    if (result.size() == config.maximum_manhattan_vanishing_directions)
+      break;
+  }
+  return result;
+}
+
+ManhattanImageFeature buildManhattanImageFeature(
+    const StructuralImageFeature &lines, const CameraModel &camera,
+    const Transform &mechanical_prior, const CalibrationConfig &config) {
+  ManhattanImageFeature result;
+  const auto directions = detectVanishingDirections(lines, camera, config);
+  if (directions.empty())
+    return result;
+  const Eigen::Vector3d gravity = config.lidar_gravity_axis.normalized();
+  const Eigen::Vector3d expected = mechanical_prior.rotation * gravity;
+  const auto vertical = std::max_element(
+      directions.begin(), directions.end(), [&](const auto &a, const auto &b) {
+        return std::abs(a.camera_direction.dot(expected)) <
+               std::abs(b.camera_direction.dot(expected));
+      });
+  result.vertical = *vertical;
+  if (result.vertical.camera_direction.dot(expected) < 0.0)
+    result.vertical.camera_direction = -result.vertical.camera_direction;
+  const double maximum_dot =
+      std::sin(config.manhattan_horizontal_orthogonality_tolerance_rad);
+  for (const auto &direction : directions) {
+    if (&direction == &*vertical ||
+        std::abs(direction.camera_direction.dot(
+            result.vertical.camera_direction)) > maximum_dot)
+      continue;
+    result.horizontal.push_back(direction);
+  }
+  return result;
+}
+
+ManhattanLidarFeature buildManhattanLidarFeature(
+    const LidarPlaneSegmentation &segmentation,
+    const CalibrationConfig &config) {
+  ManhattanLidarFeature result;
+  const Eigen::Vector3d gravity = config.lidar_gravity_axis.normalized();
+  struct WeightedDirection {
+    Eigen::Vector3d direction;
+    std::size_t support = 0;
+  };
+  std::vector<WeightedDirection> candidates;
+  for (const auto &plane : segmentation.planes) {
+    Eigen::Vector3d horizontal =
+        plane.normal - plane.normal.dot(gravity) * gravity;
+    if (horizontal.norm() <= 1e-6)
+      continue;
+    horizontal.normalize();
+    if (std::abs(plane.normal.dot(gravity)) >
+        std::sin(config.manhattan_horizontal_orthogonality_tolerance_rad))
+      continue;
+    candidates.push_back({horizontal, plane.support_points});
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const auto &a, const auto &b) { return a.support > b.support; });
+  const double merge_cosine = std::cos(config.manhattan_lidar_axis_merge_rad);
+  for (const auto &candidate : candidates) {
+    if (std::any_of(result.horizontal_directions.begin(),
+                    result.horizontal_directions.end(),
+                    [&](const auto &accepted) {
+                      return std::abs(candidate.direction.dot(accepted)) >=
+                             merge_cosine;
+                    }))
+      continue;
+    if (!result.horizontal_directions.empty() &&
+        std::abs(candidate.direction.dot(result.horizontal_directions.front())) >
+            std::sin(
+                config.manhattan_horizontal_orthogonality_tolerance_rad))
+      continue;
+    result.horizontal_directions.push_back(candidate.direction);
+    if (result.horizontal_directions.size() == 2)
+      break;
+  }
+  return result;
+}
+
+ManhattanEvaluation evaluateManhattanDirections(
+    const Parameters &parameters, const ManhattanImageFeature &image,
+    const ManhattanLidarFeature &lidar, const CalibrationConfig &config) {
+  ManhattanEvaluation result;
+  if (image.vertical.inliers == 0 || config.lidar_gravity_axis.norm() <= 1e-9)
+    return result;
+  const Eigen::Matrix3d rotation = fromParameters(parameters).rotation;
+  const Eigen::Vector3d gravity_camera =
+      (rotation * config.lidar_gravity_axis.normalized()).normalized();
+  result.vertical_error_rad = std::acos(std::clamp(
+      std::abs(gravity_camera.dot(image.vertical.camera_direction)), 0.0,
+      1.0));
+  result.vertical_inliers = image.vertical.inliers;
+  const double scale = std::max(1e-6, config.manhattan_residual_scale_rad);
+  // Keep a non-zero slope after the robust scale.  Hard clipping made every
+  // error >= scale indistinguishable, so Ceres could not recover a bad pose
+  // even though the quality gate was stricter than that scale.
+  const auto robustSquared = [scale](double angle_rad) {
+    const double normalized = angle_rad / scale;
+    return normalized <= 1.0 ? normalized * normalized
+                             : 2.0 * normalized - 1.0;
+  };
+  const double vertical_score = robustSquared(result.vertical_error_rad);
+  std::vector<std::tuple<double, std::size_t, std::size_t>> candidates;
+  for (std::size_t lidar_index = 0;
+       lidar_index < lidar.horizontal_directions.size(); ++lidar_index) {
+    const Eigen::Vector3d direction =
+        (rotation * lidar.horizontal_directions[lidar_index]).normalized();
+    for (std::size_t image_index = 0; image_index < image.horizontal.size();
+         ++image_index) {
+      const double angle = std::acos(std::clamp(
+          std::abs(direction.dot(image.horizontal[image_index]
+                                     .camera_direction)),
+          0.0, 1.0));
+      candidates.emplace_back(angle, lidar_index, image_index);
+    }
+  }
+  std::sort(candidates.begin(), candidates.end());
+  std::vector<unsigned char> lidar_used(lidar.horizontal_directions.size(), 0);
+  std::vector<unsigned char> image_used(image.horizontal.size(), 0);
+  double horizontal_error = 0.0;
+  for (const auto &[angle, lidar_index, image_index] : candidates) {
+    if (lidar_used[lidar_index] || image_used[image_index])
+      continue;
+    lidar_used[lidar_index] = 1;
+    image_used[image_index] = 1;
+    horizontal_error += angle;
+    ++result.horizontal_axes;
+  }
+  double weight = config.manhattan_vertical_weight;
+  result.score = config.manhattan_vertical_weight * vertical_score;
+  if (result.horizontal_axes > 0) {
+    result.horizontal_error_rad =
+        horizontal_error / static_cast<double>(result.horizontal_axes);
+    const double horizontal_score = robustSquared(result.horizontal_error_rad);
+    result.score += config.manhattan_horizontal_weight * horizontal_score;
+    weight += config.manhattan_horizontal_weight;
+  }
+  result.score /= std::max(1e-9, weight);
+  return result;
+}
+
 bool isRangeDiscontinuity(const Point &a, const Point &b,
                           const CalibrationConfig &config) {
   if (!a.valid() || !b.valid())
@@ -241,19 +502,61 @@ bool isRangeDiscontinuity(const Point &a, const Point &b,
   return std::abs(a.range - b.range) > threshold;
 }
 
+bool fitBoundaryLine(const std::vector<Eigen::Vector3d> &points,
+                     const CalibrationConfig &config,
+                     StructuralLineSource source, double confidence,
+                     LidarLineSegment *segment) {
+  if (points.size() < config.minimum_lidar_structural_segment_points)
+    return false;
+  Eigen::Vector3d centroid = Eigen::Vector3d::Zero();
+  for (const auto &point : points)
+    centroid += point;
+  centroid /= static_cast<double>(points.size());
+  Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
+  for (const auto &point : points) {
+    const Eigen::Vector3d delta = point - centroid;
+    covariance += delta * delta.transpose();
+  }
+  covariance /= static_cast<double>(points.size());
+  Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
+  if (solver.info() != Eigen::Success)
+    return false;
+  const double rms =
+      std::sqrt(std::max(0.0, solver.eigenvalues()[0] +
+                                  solver.eigenvalues()[1]));
+  if (rms > config.maximum_lidar_boundary_line_rms_m)
+    return false;
+  const Eigen::Vector3d direction = solver.eigenvectors().col(2).normalized();
+  std::vector<double> positions;
+  positions.reserve(points.size());
+  for (const auto &point : points)
+    positions.push_back((point - centroid).dot(direction));
+  std::sort(positions.begin(), positions.end());
+  const std::size_t trim = positions.size() / 20;
+  const Eigen::Vector3d a = centroid + positions[trim] * direction;
+  const Eigen::Vector3d b =
+      centroid + positions[positions.size() - 1 - trim] * direction;
+  if ((b - a).norm() < config.minimum_lidar_structural_segment_length_m)
+    return false;
+  *segment = {a, b, source, confidence, 1};
+  return true;
+}
+
+template <typename SelectPoint>
 std::vector<LidarLineSegment>
-extractRangeDiscontinuityLineSegments(const Scan &scan,
-                                      const CalibrationConfig &config) {
+extractGridBoundaryLineSegments(const Scan &scan,
+                                const CalibrationConfig &config,
+                                StructuralLineSource source,
+                                double confidence, SelectPoint select_point) {
   std::vector<LidarLineSegment> segments;
   const auto index = [&](std::uint32_t row, std::uint32_t column) {
     return static_cast<std::size_t>(row) * scan.config.columns + column;
   };
   std::vector<Eigen::Vector3d> run;
   const auto flush = [&]() {
-    if (run.size() >= config.minimum_lidar_structural_segment_points &&
-        (run.back() - run.front()).norm() >=
-            config.minimum_lidar_structural_segment_length_m)
-      segments.push_back({run.front(), run.back()});
+    LidarLineSegment segment;
+    if (fitBoundaryLine(run, config, source, confidence, &segment))
+      segments.push_back(segment);
     run.clear();
   };
   const auto append = [&](const Point *point) {
@@ -275,9 +578,8 @@ extractRangeDiscontinuityLineSegments(const Scan &scan,
     for (std::uint32_t row = 0; row < scan.config.rows; ++row) {
       const auto &a = scan.points[index(row, column)];
       const auto &b = scan.points[index(row, column + 1)];
-      append(isRangeDiscontinuity(a, b, config)
-                 ? (a.range <= b.range ? &a : &b)
-                 : nullptr);
+      append(select_point(a, b, index(row, column),
+                          index(row, column + 1)));
     }
     flush();
   }
@@ -287,13 +589,25 @@ extractRangeDiscontinuityLineSegments(const Scan &scan,
     for (std::uint32_t column = 0; column < scan.config.columns; ++column) {
       const auto &a = scan.points[index(row, column)];
       const auto &b = scan.points[index(row + 1, column)];
-      append(isRangeDiscontinuity(a, b, config)
-                 ? (a.range <= b.range ? &a : &b)
-                 : nullptr);
+      append(select_point(a, b, index(row, column),
+                          index(row + 1, column)));
     }
     flush();
   }
   return segments;
+}
+
+std::vector<LidarLineSegment>
+extractRangeDiscontinuityLineSegments(const Scan &scan,
+                                      const CalibrationConfig &config) {
+  return extractGridBoundaryLineSegments(
+      scan, config, StructuralLineSource::OcclusionCandidate, 1.0,
+      [&](const Point &a, const Point &b, std::size_t,
+          std::size_t) -> const Point * {
+        return isRangeDiscontinuity(a, b, config)
+                   ? (a.range <= b.range ? &a : &b)
+                   : nullptr;
+      });
 }
 
 void validateOrganizedScan(const Scan &scan) {
@@ -421,8 +735,8 @@ extractGeometryFeatures(const Scan &scan, const CalibrationConfig &config) {
       }
       const double structural_score = std::max(range_score, normal_score);
       if (structural_score >= 0.05)
-        features.push_back(
-            {point.xyz.cast<double>(), tangent.normalized(), structural_score});
+        features.push_back({point.xyz.cast<double>(), tangent.normalized(),
+                            range_score, normal_score});
     }
   if (config.maximum_nid_points > 1 &&
       features.size() > config.maximum_nid_points) {
@@ -430,7 +744,11 @@ extractGeometryFeatures(const Scan &scan, const CalibrationConfig &config) {
     std::vector<std::vector<GeometryFeature>> buckets(bins);
     for (const auto &feature : features) {
       const int bin =
-          std::min(static_cast<int>(std::clamp(feature.value, 0.0, 1.0) * bins),
+          std::min(static_cast<int>(
+                       std::clamp(std::max(feature.range_value,
+                                           feature.normal_value),
+                                  0.0, 1.0) *
+                       bins),
                    bins - 1);
       buckets[bin].push_back(feature);
     }
@@ -450,6 +768,91 @@ extractGeometryFeatures(const Scan &scan, const CalibrationConfig &config) {
   }
   return features;
 }
+
+double median(std::vector<double> values) {
+  if (values.empty())
+    return 0.0;
+  const std::size_t middle = values.size() / 2;
+  std::nth_element(values.begin(), values.begin() + middle, values.end());
+  const double upper = values[middle];
+  if (values.size() % 2 != 0)
+    return upper;
+  std::nth_element(values.begin(), values.begin() + middle - 1,
+                   values.begin() + middle);
+  return 0.5 * (values[middle - 1] + upper);
+}
+
+std::vector<GeometryFeature>
+extractCorrectedSignalFeatures(const Scan &scan,
+                               const CalibrationConfig &config) {
+  struct RawSignal {
+    std::size_t index = 0;
+    double range = 0.0;
+    double corrected_log = 0.0;
+    double residual = 0.0;
+  };
+  const auto normal_field = computeRobustNormals(scan, config);
+  std::vector<RawSignal> raw;
+  raw.reserve(scan.valid_count);
+  for (std::size_t i = 0; i < scan.points.size(); ++i) {
+    const auto &point = scan.points[i];
+    if (!point.valid() || !std::isfinite(point.signal_strength) ||
+        point.signal_strength <= 0.0F || !std::isfinite(point.range) ||
+        point.range <= 0.0F)
+      continue;
+    double incidence = 1.0;
+    if (normal_field.has_normal[i] && point.xyz.norm() > 1e-6F)
+      incidence = std::max(
+          config.minimum_signal_incidence_cosine,
+          std::abs(normal_field.normals[i].dot(
+              point.xyz.cast<double>().normalized())));
+    const double corrected_log =
+        std::log1p(static_cast<double>(point.signal_strength)) +
+        2.0 * std::log(std::max(0.05, static_cast<double>(point.range))) -
+        std::log(incidence);
+    raw.push_back({i, point.range, corrected_log, 0.0});
+  }
+  if (raw.size() < config.minimum_signal_correction_bin_points)
+    return {};
+  std::sort(raw.begin(), raw.end(),
+            [](const auto &a, const auto &b) { return a.range < b.range; });
+  const std::size_t maximum_bins =
+      raw.size() / config.minimum_signal_correction_bin_points;
+  const std::size_t bin_count = std::max<std::size_t>(
+      1, std::min<std::size_t>(config.signal_correction_range_bins,
+                               maximum_bins));
+  for (std::size_t bin = 0; bin < bin_count; ++bin) {
+    const std::size_t begin = bin * raw.size() / bin_count;
+    const std::size_t end = (bin + 1) * raw.size() / bin_count;
+    std::vector<double> values;
+    values.reserve(end - begin);
+    for (std::size_t i = begin; i < end; ++i)
+      values.push_back(raw[i].corrected_log);
+    const double center = median(std::move(values));
+    for (std::size_t i = begin; i < end; ++i)
+      raw[i].residual = raw[i].corrected_log - center;
+  }
+  std::vector<double> absolute_residuals;
+  absolute_residuals.reserve(raw.size());
+  for (const auto &sample : raw)
+    absolute_residuals.push_back(std::abs(sample.residual));
+  const double robust_scale = std::max(1e-3, 1.4826 * median(
+                                                   std::move(absolute_residuals)));
+  std::sort(raw.begin(), raw.end(),
+            [](const auto &a, const auto &b) { return a.index < b.index; });
+  const std::size_t take =
+      std::min(config.maximum_signal_nmi_points, raw.size());
+  std::vector<GeometryFeature> features;
+  features.reserve(take);
+  for (std::size_t i = 0; i < take; ++i) {
+    const auto &sample = raw[i * raw.size() / take];
+    const double normalized =
+        std::clamp(0.5 + sample.residual / (6.0 * robust_scale), 0.0, 1.0);
+    features.push_back({scan.points[sample.index].xyz.cast<double>(),
+                        Eigen::Vector3d::Zero(), normalized, 0.0});
+  }
+  return features;
+}
 double undirectedAngleDifference(double a, double b) {
   const double difference = std::abs(a - b);
   return std::min(difference, M_PI - difference);
@@ -464,10 +867,21 @@ Evaluation evaluateStructuralLines(
   Evaluation result;
   if (segments.empty() || image_lines.segments.empty())
     return result;
-  double sum = 0.0, squared_sum = 0.0;
-  double horizontal_sum = 0.0, vertical_sum = 0.0;
+  struct ProjectedLine {
+    cv::Point2d a, b;
+    double angle = 0.0;
+    double length = 0.0;
+    double confidence = 1.0;
+  };
+  struct Candidate {
+    std::size_t projected = 0, image = 0;
+    double cost = 1.0;
+  };
+  std::vector<ProjectedLine> projected_lines;
   const double cap = std::max(1.0, residual_cap_px);
   for (const auto &segment : segments) {
+    if (segment.confidence <= 0.0)
+      continue;
     // A fitted plane intersection often crosses the image while both fitted
     // endpoints are outside it. Keep the visible in-frame portion instead of
     // dropping the whole structural line.
@@ -495,10 +909,19 @@ Evaluation evaluateStructuralLines(
     double angle = std::atan2(projected_vector.y, projected_vector.x);
     if (angle < 0.0)
       angle += M_PI;
-    double best = std::numeric_limits<double>::infinity();
-    for (const auto &image_line : image_lines.segments) {
+    projected_lines.push_back(
+        {a, b, angle, projected_length, segment.confidence});
+  }
+  result.visible = projected_lines.size();
+  std::vector<Candidate> candidates;
+  for (std::size_t projected_index = 0;
+       projected_index < projected_lines.size(); ++projected_index) {
+    const auto &projected = projected_lines[projected_index];
+    for (std::size_t image_index = 0;
+         image_index < image_lines.segments.size(); ++image_index) {
+      const auto &image_line = image_lines.segments[image_index];
       const double direction_difference =
-          undirectedAngleDifference(angle, image_line.angle);
+          undirectedAngleDifference(projected.angle, image_line.angle);
       if (direction_difference > config.structural_max_direction_difference_rad)
         continue;
       const cv::Point2d axis = (image_line.b - image_line.a) / image_line.length;
@@ -509,13 +932,14 @@ Evaluation evaluateStructuralLines(
         const cv::Point2d delta = point - image_line.a;
         return std::abs(delta.x * axis.y - delta.y * axis.x);
       };
-      const double endpoint_distance = 0.5 * (across(a) + across(b));
-      const double t0 = along(a), t1 = along(b);
+      const double endpoint_distance =
+          0.5 * (across(projected.a) + across(projected.b));
+      const double t0 = along(projected.a), t1 = along(projected.b);
       const double overlap =
           std::max(0.0, std::min(std::max(t0, t1), image_line.length) -
                             std::max(std::min(t0, t1), 0.0));
       const double overlap_ratio =
-          std::clamp(overlap / std::max(1.0, std::min(projected_length,
+          std::clamp(overlap / std::max(1.0, std::min(projected.length,
                                                      image_line.length)),
                      0.0, 1.0);
       const double endpoint_objective =
@@ -525,50 +949,80 @@ Evaluation evaluateStructuralLines(
                        config.structural_max_direction_difference_rad,
                    2.0);
       const double overlap_objective = std::pow(1.0 - overlap_ratio, 2.0);
-      best = std::min(best,
-                      config.structural_endpoint_weight * endpoint_objective +
-                          config.structural_direction_weight *
-                              direction_objective +
-                          config.structural_overlap_weight * overlap_objective);
+      const double cost =
+          config.structural_endpoint_weight * endpoint_objective +
+          config.structural_direction_weight * direction_objective +
+          config.structural_overlap_weight * overlap_objective;
+      if (cost <= config.maximum_structural_pair_cost)
+        candidates.push_back({projected_index, image_index, cost});
     }
-    if (!std::isfinite(best))
-      best = 1.0;
-    sum += std::sqrt(best) * cap;
-    squared_sum += best;
-    ++result.visible;
-    if (best < 0.5)
-      ++result.projected;
-    const double horizontal_distance = std::min(angle, M_PI - angle);
-    const double vertical_distance = std::abs(angle - 0.5 * M_PI);
+  }
+  std::sort(candidates.begin(), candidates.end(),
+            [](const Candidate &a, const Candidate &b) {
+              return a.cost < b.cost;
+            });
+  std::vector<double> assigned_cost(projected_lines.size(), 1.0);
+  std::vector<unsigned char> projected_assigned(projected_lines.size(), 0);
+  std::vector<unsigned char> image_assigned(image_lines.segments.size(), 0);
+  for (const auto &candidate : candidates) {
+    if (projected_assigned[candidate.projected] ||
+        image_assigned[candidate.image])
+      continue;
+    projected_assigned[candidate.projected] = 1;
+    image_assigned[candidate.image] = 1;
+    assigned_cost[candidate.projected] = candidate.cost;
+    ++result.projected;
+  }
+  double sum = 0.0, squared_sum = 0.0;
+  double horizontal_sum = 0.0, vertical_sum = 0.0;
+  for (std::size_t i = 0; i < projected_lines.size(); ++i) {
+    const auto &projected = projected_lines[i];
+    const double best = assigned_cost[i];
+    const double weight = projected.confidence;
+    sum += weight * std::sqrt(best) * cap;
+    squared_sum += weight * best;
+    result.score_weight += weight;
+    const double horizontal_distance =
+        std::min(projected.angle, M_PI - projected.angle);
+    const double vertical_distance =
+        std::abs(projected.angle - 0.5 * M_PI);
     if (horizontal_distance <= M_PI / 6.0) {
-      horizontal_sum += best;
+      horizontal_sum += weight * best;
+      result.horizontal_score_weight += weight;
       ++result.horizontal_visible;
+      if (projected_assigned[i])
+        ++result.horizontal_projected;
     } else if (vertical_distance <= M_PI / 6.0) {
-      vertical_sum += best;
+      vertical_sum += weight * best;
+      result.vertical_score_weight += weight;
       ++result.vertical_visible;
+      if (projected_assigned[i])
+        ++result.vertical_projected;
     }
   }
-  if (result.visible > 0) {
-    result.mean = sum / result.visible;
-    result.normalized_squared = squared_sum / result.visible;
+  if (result.score_weight > 0.0) {
+    result.mean = sum / result.score_weight;
+    result.normalized_squared = squared_sum / result.score_weight;
   }
-  if (result.horizontal_visible > 0)
+  if (result.horizontal_score_weight > 0.0)
     result.horizontal_normalized_squared =
-        horizontal_sum / result.horizontal_visible;
-  if (result.vertical_visible > 0)
-    result.vertical_normalized_squared = vertical_sum / result.vertical_visible;
+        horizontal_sum / result.horizontal_score_weight;
+  if (result.vertical_score_weight > 0.0)
+    result.vertical_normalized_squared =
+        vertical_sum / result.vertical_score_weight;
   return result;
 }
 NidEvaluation normalizedInformationDistance(
     const double *parameters, const std::vector<GeometryFeature> &features,
-    const CameraModel &camera, const cv::Mat &camera_feature, int bins,
+    const CameraModel &camera, const cv::Mat &camera_feature,
+    const CalibrationConfig &config,
     const double *intrinsics = nullptr,
     const VisibilityBuffer *visibility = nullptr,
     double visibility_tolerance_m = 0.01) {
   NidEvaluation result;
+  const int bins = config.nid_histogram_bins;
   if (bins < 2 || features.empty())
     return result;
-  std::vector<double> joint(static_cast<std::size_t>(bins) * bins, 1e-12);
   Parameters p;
   std::copy(parameters, parameters + 6, p.begin());
   Intrinsics k;
@@ -577,55 +1031,128 @@ NidEvaluation normalizedInformationDistance(
     std::copy(intrinsics, intrinsics + 4, k.begin());
     kp = &k;
   }
+  struct ProjectedFeature {
+    double range_value = 0.0;
+    double normal_value = 0.0;
+    double camera_value = 0.0;
+  };
+  const int tile_rows = std::max(1, config.nid_spatial_rows);
+  const int tile_columns = std::max(1, config.nid_spatial_columns);
+  std::vector<std::vector<ProjectedFeature>> tiles(
+      static_cast<std::size_t>(tile_rows * tile_columns));
   for (const auto &feature : features) {
     double u = 0.0, v = 0.0;
     if (!visiblePoint(p, feature.point, camera, kp, visibility,
                       visibility_tolerance_m, &u, &v))
       continue;
-    const double x = std::clamp(feature.value, 0.0, 1.0) * (bins - 1);
-    const double y =
-        std::clamp(static_cast<double>(bilinear(camera_feature, u, v)), 0.0,
-                   1.0) *
-        (bins - 1);
-    const int x0 = static_cast<int>(std::floor(x));
-    const int y0 = static_cast<int>(std::floor(y));
-    const int x1 = std::min(x0 + 1, bins - 1);
-    const int y1 = std::min(y0 + 1, bins - 1);
-    const double dx = x - x0, dy = y - y0;
-    joint[static_cast<std::size_t>(x0) * bins + y0] += (1.0 - dx) * (1.0 - dy);
-    joint[static_cast<std::size_t>(x0) * bins + y1] += (1.0 - dx) * dy;
-    joint[static_cast<std::size_t>(x1) * bins + y0] += dx * (1.0 - dy);
-    joint[static_cast<std::size_t>(x1) * bins + y1] += dx * dy;
+    const int tile_column = std::clamp(
+        static_cast<int>(u * tile_columns / camera.width), 0,
+        tile_columns - 1);
+    const int tile_row = std::clamp(
+        static_cast<int>(v * tile_rows / camera.height), 0, tile_rows - 1);
+    tiles[static_cast<std::size_t>(tile_row * tile_columns + tile_column)]
+        .push_back({feature.range_value, feature.normal_value,
+                    std::clamp(static_cast<double>(
+                                   bilinear(camera_feature, u, v)),
+                               0.0, 1.0)});
     ++result.projected;
   }
   if (result.projected == 0)
     return result;
-  std::vector<double> lidar_hist(bins, 0.0), camera_hist(bins, 0.0);
-  double total = 0.0;
-  for (int x = 0; x < bins; ++x)
-    for (int y = 0; y < bins; ++y) {
-      const double value = joint[static_cast<std::size_t>(x) * bins + y];
-      lidar_hist[x] += value;
-      camera_hist[y] += value;
-      total += value;
-    }
-  auto entropy = [total](const std::vector<double> &histogram) {
-    double value = 0.0;
-    for (double count : histogram) {
-      const double probability = count / total;
-      if (probability > 0.0)
-        value -= probability * std::log(probability);
-    }
-    return value;
+  struct CellScore {
+    double nid = 1.0;
+    double entropy_ratio = 0.0;
+    bool valid = false;
   };
-  const double lidar_entropy = entropy(lidar_hist);
-  const double camera_entropy = entropy(camera_hist);
-  const double joint_entropy = entropy(joint);
-  if (joint_entropy <= 1e-9)
+  const auto score_cell = [&](const std::vector<ProjectedFeature> &samples,
+                              bool range_channel) {
+    CellScore cell;
+    if (samples.size() < config.minimum_nid_tile_points)
+      return cell;
+    std::vector<double> joint(static_cast<std::size_t>(bins) * bins, 1e-12);
+    for (const auto &sample : samples) {
+      const double lidar_value =
+          range_channel ? sample.range_value : sample.normal_value;
+      const double x = std::clamp(lidar_value, 0.0, 1.0) * (bins - 1);
+      const double y = std::clamp(sample.camera_value, 0.0, 1.0) * (bins - 1);
+      const int x0 = static_cast<int>(std::floor(x));
+      const int y0 = static_cast<int>(std::floor(y));
+      const int x1 = std::min(x0 + 1, bins - 1);
+      const int y1 = std::min(y0 + 1, bins - 1);
+      const double dx = x - x0, dy = y - y0;
+      joint[static_cast<std::size_t>(x0) * bins + y0] +=
+          (1.0 - dx) * (1.0 - dy);
+      joint[static_cast<std::size_t>(x0) * bins + y1] += (1.0 - dx) * dy;
+      joint[static_cast<std::size_t>(x1) * bins + y0] += dx * (1.0 - dy);
+      joint[static_cast<std::size_t>(x1) * bins + y1] += dx * dy;
+    }
+    std::vector<double> lidar_hist(bins, 0.0), camera_hist(bins, 0.0);
+    double total = 0.0;
+    for (int x = 0; x < bins; ++x)
+      for (int y = 0; y < bins; ++y) {
+        const double value = joint[static_cast<std::size_t>(x) * bins + y];
+        lidar_hist[x] += value;
+        camera_hist[y] += value;
+        total += value;
+      }
+    const auto entropy = [total](const std::vector<double> &histogram) {
+      double value = 0.0;
+      for (const double count : histogram) {
+        const double probability = count / total;
+        if (probability > 0.0)
+          value -= probability * std::log(probability);
+      }
+      return value;
+    };
+    const double lidar_entropy = entropy(lidar_hist);
+    const double camera_entropy = entropy(camera_hist);
+    const double joint_entropy = entropy(joint);
+    cell.entropy_ratio =
+        lidar_entropy / std::max(1e-9, std::log(static_cast<double>(bins)));
+    if (cell.entropy_ratio < config.minimum_nid_feature_entropy_ratio ||
+        joint_entropy <= 1e-9)
+      return cell;
+    const double mutual_information =
+        std::max(0.0, lidar_entropy + camera_entropy - joint_entropy);
+    cell.nid =
+        std::clamp(1.0 - mutual_information / joint_entropy, 0.0, 1.0);
+    cell.valid = true;
+    return cell;
+  };
+  double range_sum = 0.0, normal_sum = 0.0;
+  double range_entropy_sum = 0.0, normal_entropy_sum = 0.0;
+  std::size_t range_cells = 0, normal_cells = 0;
+  for (const auto &tile : tiles) {
+    const auto range = score_cell(tile, true);
+    if (range.valid) {
+      range_sum += range.nid;
+      range_entropy_sum += range.entropy_ratio;
+      ++range_cells;
+    }
+    const auto normal = score_cell(tile, false);
+    if (normal.valid) {
+      normal_sum += normal.nid;
+      normal_entropy_sum += normal.entropy_ratio;
+      ++normal_cells;
+    }
+  }
+  result.active_spatial_cells = range_cells + normal_cells;
+  double weighted_score = 0.0, active_weight = 0.0;
+  if (range_cells > 0) {
+    result.range_score = range_sum / range_cells;
+    result.range_entropy_ratio = range_entropy_sum / range_cells;
+    weighted_score += config.range_geometry_nid_weight * result.range_score;
+    active_weight += config.range_geometry_nid_weight;
+  }
+  if (normal_cells > 0) {
+    result.normal_score = normal_sum / normal_cells;
+    result.normal_entropy_ratio = normal_entropy_sum / normal_cells;
+    weighted_score += config.normal_geometry_nid_weight * result.normal_score;
+    active_weight += config.normal_geometry_nid_weight;
+  }
+  if (active_weight <= 0.0)
     return result;
-  const double mutual_information =
-      std::max(0.0, lidar_entropy + camera_entropy - joint_entropy);
-  result.score = std::clamp(1.0 - mutual_information / joint_entropy, 0.0, 1.0);
+  result.score = weighted_score / active_weight;
   result.squared_score = result.score * result.score;
   return result;
 }
@@ -633,14 +1160,15 @@ struct NidCost {
   const std::vector<GeometryFeature> &features;
   const CameraModel &camera;
   const cv::Mat &camera_feature;
-  int bins;
+  const CalibrationConfig &config;
   double scale;
   bool optimize_intrinsics;
   bool operator()(double const *const *blocks, double *residuals) const {
     const double *intrinsics = optimize_intrinsics ? blocks[1] : nullptr;
     residuals[0] =
         scale * normalizedInformationDistance(blocks[0], features, camera,
-                                              camera_feature, bins, intrinsics)
+                                              camera_feature, config,
+                                              intrinsics)
                     .score;
     return true;
   }
@@ -685,6 +1213,20 @@ struct StructuralLineCost {
         scale * std::sqrt(std::isfinite(evaluation.normalized_squared)
                               ? evaluation.normalized_squared
                               : 1.0);
+    return true;
+  }
+};
+struct ManhattanCost {
+  const ManhattanImageFeature &image;
+  const ManhattanLidarFeature &lidar;
+  const CalibrationConfig &config;
+  double scale;
+  bool operator()(double const *const *blocks, double *residuals) const {
+    Parameters parameters;
+    std::copy(blocks[0], blocks[0] + 6, parameters.begin());
+    const ManhattanEvaluation evaluation =
+        evaluateManhattanDirections(parameters, image, lidar, config);
+    residuals[0] = scale * std::sqrt(evaluation.score);
     return true;
   }
 };
@@ -761,10 +1303,15 @@ Evaluation evaluate(const Parameters &p,
                     const Intrinsics *intrinsics = nullptr,
                     double residual_cap_px = 20.0,
                     const VisibilityBuffer *visibility = nullptr,
-                    double visibility_tolerance_m = 0.01) {
+                    double visibility_tolerance_m = 0.01,
+                    int spatial_rows = 3, int spatial_columns = 4) {
   Evaluation e;
   if (points.empty())
     return e;
+  const int rows = std::max(1, spatial_rows);
+  const int columns = std::max(1, spatial_columns);
+  std::vector<unsigned char> active_cells(
+      static_cast<std::size_t>(rows * columns), 0);
   double sum = 0.0, normalized_squared_sum = 0.0;
   for (const auto &point : points) {
     double u = 0.0, v = 0.0;
@@ -778,6 +1325,13 @@ Evaluation evaluate(const Parameters &p,
       continue;
     }
     ++e.visible;
+    const int cell_x = std::clamp(
+        static_cast<int>(u / std::max(1, camera.width) * columns), 0,
+        columns - 1);
+    const int cell_y = std::clamp(
+        static_cast<int>(v / std::max(1, camera.height) * rows), 0,
+        rows - 1);
+    active_cells[static_cast<std::size_t>(cell_y * columns + cell_x)] = 1;
     const double r =
         residualForPoint(p.data(), point, camera, distance,
                          intrinsics ? intrinsics->data() : nullptr);
@@ -790,18 +1344,26 @@ Evaluation evaluate(const Parameters &p,
   }
   if (e.visible == 0)
     return e;
+  e.active_spatial_cells = static_cast<std::size_t>(
+      std::count(active_cells.begin(), active_cells.end(), 1));
   e.mean = sum / e.visible;
   e.normalized_squared = normalized_squared_sum / e.visible;
   return e;
 }
 double compositeObjective(const Evaluation &edge, const NidEvaluation &nid,
+                          const NidEvaluation &signal_nmi,
                           const Evaluation &line,
+                          const ManhattanEvaluation &manhattan,
                           const CalibrationConfig &config,
-                          double direction_prior = 0.0) {
+                          double direction_prior = 0.0,
+                          double coverage_objective = 0.0) {
   return config.edge_alignment_weight * edge.normalized_squared +
          config.normalized_information_distance_weight * nid.squared_score +
+         config.signal_nmi_weight * signal_nmi.squared_score +
          config.structural_line_weight * line.normalized_squared +
-         config.camera_direction_prior_weight * direction_prior;
+         config.manhattan_direction_weight * manhattan.score +
+         config.camera_direction_prior_weight * direction_prior +
+         config.coverage_penalty_weight * coverage_objective;
 }
 struct DirectionPriorCost {
   Eigen::Vector3d expected_forward;
@@ -831,7 +1393,9 @@ Parameters coarseSearch(Parameters p, const Parameters &prior,
                         const CameraModel &camera, const cv::Mat &distance,
                         const CalibrationConfig &config) {
   auto best =
-      evaluate(p, points, camera, distance, nullptr, config.residual_cap_px)
+      evaluate(p, points, camera, distance, nullptr, config.residual_cap_px,
+               nullptr, 0.01, config.coverage_grid_rows,
+               config.coverage_grid_columns)
           .mean;
   double rs = config.coarse_rotation_step_rad,
          ts = config.coarse_translation_step_m;
@@ -848,7 +1412,9 @@ Parameters coarseSearch(Parameters p, const Parameters &prior,
         if (std::abs(candidate[axis] - prior[axis]) > bound)
           continue;
         double cost = evaluate(candidate, points, camera, distance, nullptr,
-                               config.residual_cap_px)
+                               config.residual_cap_px, nullptr, 0.01,
+                               config.coverage_grid_rows,
+                               config.coverage_grid_columns)
                           .mean;
         if (cost < winner_cost) {
           winner = candidate;
@@ -889,32 +1455,103 @@ cv::Mat buildCameraEdgeDistanceTransform(const cv::Mat &bgr,
   return distance;
 }
 
+std::vector<ManhattanVanishingDirectionDiagnostic>
+detectManhattanVanishingDirections(const cv::Mat &bgr,
+                                   const CameraModel &camera,
+                                   const CalibrationConfig &config) {
+  if (bgr.empty())
+    throw std::invalid_argument("Camera image is empty");
+  const auto feature = buildStructuralLineDistance(bgr, config);
+  const auto directions = detectVanishingDirections(feature, camera, config);
+  std::vector<ManhattanVanishingDirectionDiagnostic> diagnostics;
+  diagnostics.reserve(directions.size());
+  for (const auto &direction : directions)
+    diagnostics.push_back({direction.camera_direction, direction.inliers,
+                           direction.mean_residual});
+  return diagnostics;
+}
+
 std::vector<Eigen::Vector3d>
 extractLidarEdgePoints(const Scan &scan, const CalibrationConfig &config) {
+  return extractLidarEdgePoints(scan, segmentLidarPlanes(scan, config), config);
+}
+
+std::vector<Eigen::Vector3d> extractLidarEdgePoints(
+    const Scan &scan, const LidarPlaneSegmentation &segmentation,
+    const CalibrationConfig &config) {
   if (scan.points.size() !=
       static_cast<std::size_t>(scan.config.rows) * scan.config.columns)
     throw std::invalid_argument("Organized scan shape mismatch");
+  if (segmentation.labels.size() != scan.points.size() ||
+      segmentation.normals.size() != scan.points.size() ||
+      segmentation.has_normal.size() != scan.points.size())
+    throw std::invalid_argument("LiDAR plane segmentation shape mismatch");
   std::vector<bool> selected(scan.points.size(), false);
-  auto mark = [&](std::size_t a, std::size_t b) {
+  const auto gap = [&](std::size_t a, std::size_t b) {
+    if (a >= scan.points.size() || b >= scan.points.size() ||
+        !scan.points[a].valid() || !scan.points[b].valid())
+      return std::optional<double>{};
+    return std::optional<double>{
+        std::abs(scan.points[a].range - scan.points[b].range)};
+  };
+  auto mark = [&](std::size_t a, std::size_t b, std::size_t before,
+                  std::size_t after) {
     const auto &x = scan.points[a];
     const auto &y = scan.points[b];
     if (!x.valid() || !y.valid())
       return;
+    if (segmentation.labels[a] >= 0 &&
+        segmentation.labels[a] == segmentation.labels[b])
+      return;
+    if (segmentation.has_normal[a] && segmentation.has_normal[b]) {
+      const Eigen::Vector3d delta =
+          y.xyz.cast<double>() - x.xyz.cast<double>();
+      const auto &nx = segmentation.normals[a];
+      const auto &ny = segmentation.normals[b];
+      if (std::abs(nx.dot(ny)) >=
+              std::cos(config.lidar_plane_normal_threshold_rad) &&
+          std::abs(nx.dot(delta)) <=
+              config.lidar_plane_neighbor_distance_threshold_m &&
+          std::abs(ny.dot(delta)) <=
+              config.lidar_plane_neighbor_distance_threshold_m)
+        return;
+    }
     double threshold = std::max(config.lidar_edge_absolute_threshold_m,
                                 config.lidar_edge_relative_threshold *
                                     std::min(x.range, y.range));
-    if (std::abs(x.range - y.range) > threshold) {
-      selected[a] = true;
-      selected[b] = true;
+    const double current_gap = std::abs(x.range - y.range);
+    if (current_gap <= threshold)
+      return;
+    const auto previous_gap = gap(before, a);
+    const auto next_gap = gap(b, after);
+    double local_gap = 0.0;
+    bool has_local_reference = false;
+    if (previous_gap) {
+      local_gap = *previous_gap;
+      has_local_reference = true;
     }
+    if (next_gap) {
+      local_gap = std::max(local_gap, *next_gap);
+      has_local_reference = true;
+    }
+    if (has_local_reference &&
+        current_gap <
+            config.lidar_edge_minimum_local_contrast_ratio * local_gap)
+      return;
+    selected[a] = true;
+    selected[b] = true;
   };
+  const std::size_t none = scan.points.size();
   for (std::uint32_t r = 0; r < scan.config.rows; ++r)
     for (std::uint32_t c = 0; c < scan.config.columns; ++c) {
       std::size_t i = static_cast<std::size_t>(r) * scan.config.columns + c;
       if (c + 1 < scan.config.columns)
-        mark(i, i + 1);
+        mark(i, i + 1, c > 0 ? i - 1 : none,
+             c + 2 < scan.config.columns ? i + 2 : none);
       if (r + 1 < scan.config.rows)
-        mark(i, i + scan.config.columns);
+        mark(i, i + scan.config.columns,
+             r > 0 ? i - scan.config.columns : none,
+             r + 2 < scan.config.rows ? i + 2 * scan.config.columns : none);
     }
   std::vector<Eigen::Vector3d> out;
   for (std::size_t i = 0; i < selected.size(); ++i)
@@ -1325,6 +1962,43 @@ std::vector<StructuralLineSegment3d> extractLidarPlaneIntersectionSegments(
   return segments;
 }
 
+std::vector<StructuralLineSegment3d> extractLidarPlaneBoundarySegments(
+    const Scan &scan, const LidarPlaneSegmentation &segmentation,
+    const CalibrationConfig &config) {
+  validateOrganizedScan(scan);
+  if (!config.enable_plane_boundary_segments)
+    return {};
+  if (segmentation.labels.size() != scan.points.size() ||
+      segmentation.normals.size() != scan.points.size() ||
+      segmentation.has_normal.size() != scan.points.size())
+    throw std::invalid_argument("Plane segmentation does not match scan");
+  const double normal_cosine =
+      std::cos(config.lidar_plane_normal_threshold_rad);
+  return extractGridBoundaryLineSegments(
+      scan, config, StructuralLineSource::PlaneBoundary,
+      config.plane_boundary_confidence,
+      [&](const Point &a, const Point &b, std::size_t a_index,
+          std::size_t b_index) -> const Point * {
+        if (!a.valid() || !b.valid())
+          return nullptr;
+        const int a_label = segmentation.labels[a_index];
+        const int b_label = segmentation.labels[b_index];
+        if ((a_label >= 0) == (b_label >= 0))
+          return nullptr;
+        const std::size_t plane_index = a_label >= 0 ? a_index : b_index;
+        const std::size_t other_index = a_label >= 0 ? b_index : a_index;
+        const int label = segmentation.labels[plane_index];
+        const bool normal_boundary =
+            segmentation.has_normal[other_index] &&
+            std::abs(segmentation.normals[other_index].dot(
+                segmentation.planes[static_cast<std::size_t>(label)].normal)) <
+                normal_cosine;
+        if (!isRangeDiscontinuity(a, b, config) && !normal_boundary)
+          return nullptr;
+        return &scan.points[plane_index];
+      });
+}
+
 std::vector<StructuralLineSegment3d>
 extractLidarOcclusionSegments(const Scan &scan,
                               const CalibrationConfig &config) {
@@ -1332,11 +2006,291 @@ extractLidarOcclusionSegments(const Scan &scan,
   return extractRangeDiscontinuityLineSegments(scan, config);
 }
 
+namespace {
+bool similarLineSegments(const StructuralLineSegment3d &a,
+                         const StructuralLineSegment3d &b,
+                         const CalibrationConfig &config) {
+  const Eigen::Vector3d a_vector = a.b - a.a;
+  const Eigen::Vector3d b_vector = b.b - b.a;
+  const double a_length = a_vector.norm(), b_length = b_vector.norm();
+  if (a_length <= 1e-9 || b_length <= 1e-9)
+    return false;
+  const Eigen::Vector3d a_direction = a_vector / a_length;
+  const Eigen::Vector3d b_direction = b_vector / b_length;
+  const double angle = std::acos(std::clamp(
+      std::abs(a_direction.dot(b_direction)), 0.0, 1.0));
+  if (angle > config.persistent_occlusion_max_angle_rad)
+    return false;
+  const auto line_distance = [](const Eigen::Vector3d &point,
+                                const Eigen::Vector3d &origin,
+                                const Eigen::Vector3d &direction) {
+    const Eigen::Vector3d delta = point - origin;
+    return (delta - delta.dot(direction) * direction).norm();
+  };
+  const Eigen::Vector3d a_midpoint = 0.5 * (a.a + a.b);
+  const Eigen::Vector3d b_midpoint = 0.5 * (b.a + b.b);
+  if (std::max(line_distance(a_midpoint, b.a, b_direction),
+               line_distance(b_midpoint, a.a, a_direction)) >
+      config.persistent_occlusion_max_line_distance_m)
+    return false;
+  double b0 = (b.a - a.a).dot(a_direction);
+  double b1 = (b.b - a.a).dot(a_direction);
+  if (b0 > b1)
+    std::swap(b0, b1);
+  const double overlap =
+      std::max(0.0, std::min(a_length, b1) - std::max(0.0, b0));
+  return overlap / std::max(1e-9, std::min(a_length, b_length)) >=
+         config.persistent_occlusion_min_overlap_ratio;
+}
+} // namespace
+
+std::vector<std::vector<StructuralLineSegment3d>>
+retainPersistentLidarOcclusionSegments(
+    const std::vector<std::vector<StructuralLineSegment3d>> &observations,
+    const CalibrationConfig &config) {
+  std::vector<std::vector<StructuralLineSegment3d>> retained(
+      observations.size());
+  if (!config.enable_persistent_occlusion_segments ||
+      observations.size() < config.minimum_persistent_occlusion_observations)
+    return retained;
+  const std::size_t required = std::max(
+      config.minimum_persistent_occlusion_observations,
+      static_cast<std::size_t>(std::ceil(
+          config.minimum_persistent_occlusion_observation_ratio *
+          observations.size())));
+  for (std::size_t observation = 0; observation < observations.size();
+       ++observation)
+    for (const auto &candidate : observations[observation]) {
+      std::size_t support = 1;
+      for (std::size_t other = 0; other < observations.size(); ++other) {
+        if (other == observation)
+          continue;
+        if (std::any_of(observations[other].begin(), observations[other].end(),
+                        [&](const auto &segment) {
+                          return similarLineSegments(candidate, segment, config);
+                        }))
+          ++support;
+      }
+      if (support < required ||
+          std::any_of(retained[observation].begin(),
+                      retained[observation].end(), [&](const auto &segment) {
+                        return similarLineSegments(candidate, segment, config);
+                      }))
+        continue;
+      auto stable = candidate;
+      stable.source = StructuralLineSource::PersistentOcclusion;
+      stable.confidence = config.persistent_occlusion_confidence;
+      stable.support_observations = support;
+      retained[observation].push_back(stable);
+    }
+  return retained;
+}
+
 std::vector<StructuralLineSegment3d>
 extractLidarStructuralSegments(const Scan &scan,
                                const CalibrationConfig &config) {
   const auto segmentation = segmentLidarPlanes(scan, config);
-  return extractLidarPlaneIntersectionSegments(scan, segmentation, config);
+  auto segments =
+      extractLidarPlaneIntersectionSegments(scan, segmentation, config);
+  auto boundaries =
+      extractLidarPlaneBoundarySegments(scan, segmentation, config);
+  segments.insert(segments.end(), boundaries.begin(), boundaries.end());
+  return segments;
+}
+
+std::vector<SignalNmiPoseScore> evaluateSignalNmiPoses(
+    const std::vector<CalibrationObservation> &observations,
+    const std::vector<Transform> &transforms,
+    const CalibrationConfig &config) {
+  std::vector<SignalNmiPoseScore> results(transforms.size());
+  if (observations.empty() || transforms.empty())
+    return results;
+  CalibrationConfig signal_config = config;
+  signal_config.range_geometry_nid_weight = 1.0;
+  signal_config.normal_geometry_nid_weight = 0.0;
+  signal_config.minimum_nid_feature_entropy_ratio =
+      config.minimum_signal_entropy_ratio;
+  struct PreparedSignal {
+    CameraModel camera;
+    cv::Mat intensity;
+    std::vector<GeometryFeature> features;
+    std::vector<Eigen::Vector3d> cloud;
+  };
+  std::vector<PreparedSignal> prepared;
+  prepared.reserve(observations.size());
+  for (const auto &observation : observations) {
+    if (observation.camera.width <= 0 || observation.camera.height <= 0 ||
+        observation.camera.k(0, 0) <= 0.0 ||
+        observation.camera.k(1, 1) <= 0.0)
+      throw std::invalid_argument("Invalid camera model for signal NMI");
+    auto features =
+        extractCorrectedSignalFeatures(observation.scan, config);
+    cv::Mat intensity =
+        buildCameraIntensityFeature(observation.bgr);
+    std::vector<Eigen::Vector3d> cloud;
+    cloud.reserve(observation.scan.valid_count);
+    for (const auto &point : observation.scan.points)
+      if (point.valid())
+        cloud.push_back(point.xyz.cast<double>());
+    prepared.push_back({observation.camera, std::move(intensity),
+                        std::move(features), std::move(cloud)});
+  }
+  for (std::size_t pose = 0; pose < transforms.size(); ++pose) {
+    auto &result = results[pose];
+    const Parameters parameters = toParameters(transforms[pose]);
+    double score_sum = 0.0, entropy_sum = 0.0;
+    std::size_t active_scenes = 0;
+    for (const auto &item : prepared) {
+      const auto visibility =
+          config.enable_visibility_filter
+              ? buildVisibilityBuffer(parameters, item.cloud, item.camera,
+                                      nullptr, config.coarse_visibility_scale)
+              : VisibilityBuffer{};
+      const auto current = normalizedInformationDistance(
+          parameters.data(), item.features, item.camera, item.intensity,
+          signal_config, nullptr,
+          config.enable_visibility_filter ? &visibility : nullptr,
+          config.visibility_depth_tolerance_m);
+      score_sum += current.score;
+      result.projected_points += current.projected;
+      result.active_spatial_cells += current.active_spatial_cells;
+      if (current.range_score >= 0.0) {
+        entropy_sum += current.range_entropy_ratio;
+        ++active_scenes;
+      }
+    }
+    result.score = score_sum / observations.size();
+    result.entropy_ratio =
+        active_scenes > 0 ? entropy_sum / active_scenes : 0.0;
+    result.valid =
+        active_scenes == observations.size() &&
+        result.projected_points >=
+            config.minimum_signal_nmi_projected_points * observations.size() &&
+        result.active_spatial_cells >=
+            config.minimum_signal_nmi_active_spatial_cells *
+                observations.size();
+  }
+  return results;
+}
+
+SignalNmiPoseScore evaluateSignalNmiPose(
+    const std::vector<CalibrationObservation> &observations,
+    const Transform &t_camera_lidar, const CalibrationConfig &config) {
+  return evaluateSignalNmiPoses(observations, {t_camera_lidar}, config).front();
+}
+
+std::vector<PoseSceneMetrics> evaluateCalibrationPoseScenes(
+    const std::vector<CalibrationObservation> &observations,
+    const Transform &t_camera_lidar, const CalibrationConfig &config) {
+  std::vector<PoseSceneMetrics> results(observations.size());
+  if (observations.empty())
+    return results;
+  const Parameters parameters = toParameters(t_camera_lidar);
+  CalibrationConfig signal_config = config;
+  signal_config.range_geometry_nid_weight = 1.0;
+  signal_config.normal_geometry_nid_weight = 0.0;
+  signal_config.minimum_nid_feature_entropy_ratio =
+      config.minimum_signal_entropy_ratio;
+  std::vector<LidarPlaneSegmentation> segmentations;
+  std::vector<std::vector<StructuralLineSegment3d>> raw_occlusions;
+  segmentations.reserve(observations.size());
+  raw_occlusions.reserve(observations.size());
+  for (const auto &observation : observations) {
+    segmentations.push_back(segmentLidarPlanes(observation.scan, config));
+    raw_occlusions.push_back(
+        extractLidarOcclusionSegments(observation.scan, config));
+  }
+  const auto persistent_occlusions =
+      retainPersistentLidarOcclusionSegments(raw_occlusions, config);
+  for (std::size_t i = 0; i < observations.size(); ++i) {
+    const auto &observation = observations[i];
+    auto &metrics = results[i];
+    std::size_t camera_edges = 0;
+    const cv::Mat distance = buildCameraEdgeDistanceTransform(
+        observation.bgr, config, &camera_edges);
+    const auto edge_points = extractLidarEdgePoints(
+        observation.scan, segmentations[i], config);
+    std::vector<Eigen::Vector3d> cloud;
+    cloud.reserve(observation.scan.valid_count);
+    for (const auto &point : observation.scan.points)
+      if (point.valid())
+        cloud.push_back(point.xyz.cast<double>());
+    const auto visibility =
+        config.enable_visibility_filter
+            ? buildVisibilityBuffer(parameters, cloud, observation.camera,
+                                    nullptr, config.coarse_visibility_scale)
+            : VisibilityBuffer{};
+      const auto edge = evaluate(
+        parameters, edge_points, observation.camera, distance, nullptr,
+        config.residual_cap_px,
+        config.enable_visibility_filter ? &visibility : nullptr,
+        config.visibility_depth_tolerance_m, config.coverage_grid_rows,
+        config.coverage_grid_columns);
+    const auto geometry = extractGeometryFeatures(observation.scan, config);
+    const auto geometry_nid = normalizedInformationDistance(
+        parameters.data(), geometry, observation.camera,
+        buildCameraGradientFeature(observation.bgr), config, nullptr,
+        config.enable_visibility_filter ? &visibility : nullptr,
+        config.visibility_depth_tolerance_m);
+    auto structural_segments = extractLidarPlaneIntersectionSegments(
+        observation.scan, segmentations[i], config);
+    auto plane_boundaries = extractLidarPlaneBoundarySegments(
+        observation.scan, segmentations[i], config);
+    structural_segments.insert(structural_segments.end(),
+                               plane_boundaries.begin(),
+                               plane_boundaries.end());
+    structural_segments.insert(structural_segments.end(),
+                               persistent_occlusions[i].begin(),
+                               persistent_occlusions[i].end());
+    const auto structural_image =
+        buildStructuralLineDistance(observation.bgr, config);
+    const auto structural = evaluateStructuralLines(
+        parameters, structural_segments, observation.camera,
+        structural_image, nullptr, config.residual_cap_px,
+        config.enable_visibility_filter ? &visibility : nullptr,
+        config.visibility_depth_tolerance_m, config);
+    const auto manhattan = evaluateManhattanDirections(
+        parameters,
+        buildManhattanImageFeature(structural_image, observation.camera,
+                                   t_camera_lidar, config),
+        buildManhattanLidarFeature(segmentations[i], config), config);
+    const auto signal_features =
+        extractCorrectedSignalFeatures(observation.scan, config);
+    const auto signal = normalizedInformationDistance(
+        parameters.data(), signal_features, observation.camera,
+        buildCameraIntensityFeature(observation.bgr), signal_config, nullptr,
+        config.enable_visibility_filter ? &visibility : nullptr,
+        config.visibility_depth_tolerance_m);
+    metrics.camera_edge_pixels = camera_edges;
+    metrics.visible_edge_points = edge.visible;
+    metrics.aligned_edge_points = edge.projected;
+    metrics.edge_active_spatial_cells = edge.active_spatial_cells;
+    metrics.projected_ratio =
+        edge.visible > 0
+            ? static_cast<double>(edge.projected) / edge.visible
+            : 0.0;
+    metrics.mean_edge_distance_px = edge.mean;
+    metrics.nid_projected_points = geometry_nid.projected;
+    metrics.nid_active_spatial_cells = geometry_nid.active_spatial_cells;
+    metrics.geometry_nid = geometry_nid.score;
+    metrics.range_nid = geometry_nid.range_score;
+    metrics.normal_nid = geometry_nid.normal_score;
+    metrics.structural_visible_segments = structural.visible;
+    metrics.structural_matched_segments = structural.projected;
+    metrics.horizontal_structural_matches = structural.horizontal_projected;
+    metrics.vertical_structural_matches = structural.vertical_projected;
+    metrics.structural_objective = structural.normalized_squared;
+    metrics.manhattan_vertical_inliers = manhattan.vertical_inliers;
+    metrics.manhattan_horizontal_axes = manhattan.horizontal_axes;
+    metrics.manhattan_vertical_error_deg =
+        std::isfinite(manhattan.vertical_error_rad)
+            ? manhattan.vertical_error_rad * kRadToDeg
+            : -1.0;
+    metrics.signal_projected_points = signal.projected;
+    metrics.signal_active_spatial_cells = signal.active_spatial_cells;
+    metrics.signal_nmi = signal.score;
+  }
+  return results;
 }
 
 CalibrationResult calibrateExtrinsic(const cv::Mat &bgr,
@@ -1357,6 +2311,10 @@ CalibrationResult calibrateExtrinsic(const cv::Mat &bgr,
     return result;
   };
   try {
+    if (!validLidarEdgeConfig(config)) {
+      result.reason_code = "INVALID_LIDAR_EDGE_CONFIG";
+      return finish();
+    }
     if (camera.k(0, 0) <= 0 || camera.k(1, 1) <= 0) {
       result.reason_code = "INVALID_CAMERA_INTRINSIC";
       return finish();
@@ -1375,7 +2333,9 @@ CalibrationResult calibrateExtrinsic(const cv::Mat &bgr,
     }
     Parameters prior = toParameters(mechanical_prior), params = prior;
     auto initial = evaluate(params, points, camera, distance, nullptr,
-                            config.residual_cap_px);
+                            config.residual_cap_px, nullptr, 0.01,
+                            config.coverage_grid_rows,
+                            config.coverage_grid_columns);
     result.metrics.initial_mean_edge_distance_px = initial.mean;
     params = coarseSearch(params, prior, points, camera, distance, config);
     ceres::Problem problem;
@@ -1406,9 +2366,12 @@ CalibrationResult calibrateExtrinsic(const cv::Mat &bgr,
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     auto final = evaluate(params, points, camera, distance, nullptr,
-                          config.residual_cap_px);
+                          config.residual_cap_px, nullptr, 0.01,
+                          config.coverage_grid_rows,
+                          config.coverage_grid_columns);
     const Transform candidate = fromParameters(params);
     result.candidate_t_camera_lidar = candidate;
+    result.candidate_available = true;
     result.metrics.projected_edge_points = final.projected;
     result.metrics.projected_ratio = double(final.projected) / points.size();
     result.metrics.final_mean_edge_distance_px = final.mean;
@@ -1466,19 +2429,33 @@ CalibrationResult calibrateExtrinsicMultiScene(
     CameraModel camera;
     cv::Mat distance;
     cv::Mat camera_feature;
+    cv::Mat camera_intensity;
     StructuralImageFeature structural_image;
+    ManhattanImageFeature manhattan_image;
+    ManhattanLidarFeature manhattan_lidar;
     std::vector<Eigen::Vector3d> points;
     std::vector<Eigen::Vector3d> cloud;
     std::vector<GeometryFeature> geometry;
+    std::vector<GeometryFeature> signal;
     std::vector<LidarLineSegment> structural_segments;
+    std::vector<LidarLineSegment> occlusion_segments;
   };
   try {
     if (observations.empty()) {
       result.reason_code = "OBSERVATIONS_EMPTY";
       return finish();
     }
+    if (!validLidarEdgeConfig(config)) {
+      result.reason_code = "INVALID_LIDAR_EDGE_CONFIG";
+      return finish();
+    }
     result.estimated_camera = observations.front().camera;
     result.candidate_camera = observations.front().camera;
+    if (config.optimize_camera_intrinsics &&
+        !config.enable_experimental_joint_intrinsics) {
+      result.reason_code = "JOINT_INTRINSIC_EXPERIMENTAL_DISABLED";
+      return finish();
+    }
     if (config.optimize_camera_intrinsics &&
         observations.size() < config.minimum_intrinsic_observations) {
       result.reason_code = "INTRINSIC_OBSERVATIONS_INSUFFICIENT";
@@ -1494,20 +2471,55 @@ CalibrationResult calibrateExtrinsicMultiScene(
     }
     if (config.edge_alignment_weight < 0.0 ||
         config.normalized_information_distance_weight < 0.0 ||
+        config.signal_nmi_weight < 0.0 ||
         config.structural_line_weight < 0.0 ||
+        config.manhattan_direction_weight < 0.0 ||
         config.camera_direction_prior_weight < 0.0 ||
         config.edge_alignment_weight +
                 config.normalized_information_distance_weight +
+                config.signal_nmi_weight +
                 config.structural_line_weight +
+                config.manhattan_direction_weight +
                 config.camera_direction_prior_weight <=
             0.0) {
       result.reason_code = "INVALID_OBJECTIVE_WEIGHTS";
       return finish();
     }
+    if (config.coverage_grid_rows < 1 || config.coverage_grid_columns < 1 ||
+        config.coverage_penalty_weight < 0.0 ||
+        config.minimum_relative_nid_coverage < 0.0 ||
+        config.minimum_relative_nid_coverage > 1.0 ||
+        config.minimum_relative_edge_spatial_coverage < 0.0 ||
+        config.minimum_relative_edge_spatial_coverage > 1.0) {
+      result.reason_code = "INVALID_COVERAGE_CONFIG";
+      return finish();
+    }
     if (config.normalized_information_distance_weight > 0.0 &&
         (config.nid_histogram_bins < 2 || config.maximum_nid_points < 2 ||
-         config.lidar_normal_change_threshold_rad <= 0.0)) {
+         config.lidar_normal_change_threshold_rad <= 0.0 ||
+         config.nid_spatial_rows < 1 || config.nid_spatial_columns < 1 ||
+         config.minimum_nid_tile_points < 2 ||
+         !(config.minimum_nid_feature_entropy_ratio >= 0.0 &&
+           config.minimum_nid_feature_entropy_ratio < 1.0) ||
+         config.range_geometry_nid_weight < 0.0 ||
+         config.normal_geometry_nid_weight < 0.0 ||
+         config.range_geometry_nid_weight +
+                 config.normal_geometry_nid_weight <=
+             0.0)) {
       result.reason_code = "INVALID_NID_CONFIG";
+      return finish();
+    }
+    if (config.signal_nmi_weight > 0.0 &&
+        (config.maximum_signal_nmi_points < 2 ||
+         config.minimum_signal_nmi_projected_points < 2 ||
+         config.minimum_signal_nmi_active_spatial_cells < 1 ||
+         config.signal_correction_range_bins < 1 ||
+         config.minimum_signal_correction_bin_points < 2 ||
+         !(config.minimum_signal_incidence_cosine > 0.0 &&
+           config.minimum_signal_incidence_cosine <= 1.0) ||
+         !(config.minimum_signal_entropy_ratio >= 0.0 &&
+           config.minimum_signal_entropy_ratio < 1.0))) {
+      result.reason_code = "INVALID_SIGNAL_NMI_CONFIG";
       return finish();
     }
     if ((config.coarse_yaw_span_rad > 0.0 || config.use_coarse_yaw_bounds) &&
@@ -1515,6 +2527,24 @@ CalibrationResult calibrateExtrinsicMultiScene(
          (config.use_coarse_yaw_bounds &&
           config.coarse_yaw_max_rad < config.coarse_yaw_min_rad))) {
       result.reason_code = "INVALID_MULTISTART_CONFIG";
+      return finish();
+    }
+    if (config.manhattan_direction_weight > 0.0 &&
+        (config.lidar_gravity_axis.norm() <= 1e-9 ||
+         config.maximum_manhattan_image_lines < 2 ||
+         config.maximum_manhattan_vanishing_directions < 3 ||
+         config.minimum_manhattan_vanishing_inliers < 2 ||
+         config.manhattan_vanishing_inlier_threshold_rad <= 0.0 ||
+         config.manhattan_vanishing_separation_rad <= 0.0 ||
+         config.manhattan_horizontal_orthogonality_tolerance_rad <= 0.0 ||
+         config.manhattan_lidar_axis_merge_rad <= 0.0 ||
+         config.manhattan_residual_scale_rad <= 0.0 ||
+         config.manhattan_vertical_weight < 0.0 ||
+         config.manhattan_horizontal_weight < 0.0 ||
+         config.manhattan_vertical_weight +
+                 config.manhattan_horizontal_weight <=
+             0.0)) {
+      result.reason_code = "INVALID_MANHATTAN_CONFIG";
       return finish();
     }
     const double structural_component_weight =
@@ -1532,7 +2562,20 @@ CalibrationResult calibrateExtrinsicMultiScene(
          config.minimum_plane_pair_boundary_contacts < 2 ||
          config.minimum_plane_intersection_angle_rad <= 0.0 ||
          config.maximum_plane_intersection_boundary_distance_m <= 0.0 ||
+         config.maximum_lidar_boundary_line_rms_m <= 0.0 ||
+         config.plane_boundary_confidence < 0.0 ||
+         config.persistent_occlusion_confidence < 0.0 ||
+         (config.enable_persistent_occlusion_segments &&
+          (config.minimum_persistent_occlusion_observations < 2 ||
+           !(config.minimum_persistent_occlusion_observation_ratio > 0.0 &&
+             config.minimum_persistent_occlusion_observation_ratio <= 1.0) ||
+           config.persistent_occlusion_max_angle_rad <= 0.0 ||
+           config.persistent_occlusion_max_line_distance_m <= 0.0 ||
+           !(config.persistent_occlusion_min_overlap_ratio > 0.0 &&
+             config.persistent_occlusion_min_overlap_ratio <= 1.0))) ||
          config.structural_max_direction_difference_rad <= 0.0 ||
+         !(config.maximum_structural_pair_cost > 0.0 &&
+           config.maximum_structural_pair_cost <= 1.0) ||
          std::abs(structural_component_weight - 1.0) > 1e-6)) {
       result.reason_code = "INVALID_STRUCTURAL_LINE_CONFIG";
       return finish();
@@ -1559,28 +2602,47 @@ CalibrationResult calibrateExtrinsicMultiScene(
         result.reason_code = "CAMERA_EDGE_INSUFFICIENT";
         return finish();
       }
-      auto points = extractLidarEdgePoints(observation.scan, config);
+      cv::Mat camera_feature = buildCameraGradientFeature(observation.bgr);
+      cv::Mat camera_intensity =
+          buildCameraIntensityFeature(observation.bgr);
+      auto geometry = extractGeometryFeatures(observation.scan, config);
+      auto signal = extractCorrectedSignalFeatures(observation.scan, config);
+      const auto plane_segmentation =
+          segmentLidarPlanes(observation.scan, config);
+      auto points =
+          extractLidarEdgePoints(observation.scan, plane_segmentation, config);
       if (points.size() < config.minimum_lidar_edge_points) {
         result.reason_code = "LIDAR_EDGE_INSUFFICIENT";
         return finish();
       }
-      cv::Mat camera_feature = buildCameraGradientFeature(observation.bgr);
-      auto geometry = extractGeometryFeatures(observation.scan, config);
-      const auto plane_segmentation =
-          segmentLidarPlanes(observation.scan, config);
       auto structural_segments = extractLidarPlaneIntersectionSegments(
           observation.scan, plane_segmentation, config);
+      auto plane_boundaries = extractLidarPlaneBoundarySegments(
+          observation.scan, plane_segmentation, config);
+      structural_segments.insert(structural_segments.end(),
+                                 plane_boundaries.begin(),
+                                 plane_boundaries.end());
       const auto occlusion_segments =
           extractRangeDiscontinuityLineSegments(observation.scan, config);
       const auto structural = buildStructuralLineDistance(observation.bgr, config);
+      const auto manhattan_image = buildManhattanImageFeature(
+          structural, observation.camera, mechanical_prior, config);
+      const auto manhattan_lidar =
+          buildManhattanLidarFeature(plane_segmentation, config);
       if (config.normalized_information_distance_weight > 0.0 &&
           geometry.size() < config.minimum_nid_projected_points) {
         result.reason_code = "LIDAR_GEOMETRY_FEATURE_INSUFFICIENT";
         return finish();
       }
+      if (config.signal_nmi_weight > 0.0 &&
+          signal.size() < config.minimum_signal_nmi_projected_points) {
+        result.reason_code = "LIDAR_SIGNAL_FEATURE_INSUFFICIENT";
+        return finish();
+      }
       result.metrics.camera_edge_pixels += camera_edges;
       result.metrics.lidar_edge_points += points.size();
       result.metrics.lidar_geometry_points += geometry.size();
+      result.metrics.lidar_signal_points += signal.size();
       result.metrics.camera_structural_lines += structural.line_count;
       result.metrics.lidar_planes += plane_segmentation.planes.size();
       result.metrics.lidar_structural_segments += structural_segments.size();
@@ -1593,10 +2655,26 @@ CalibrationResult calibrateExtrinsicMultiScene(
         if (point.valid())
           cloud.push_back(point.xyz.cast<double>());
       prepared.push_back({observation.camera, std::move(distance),
-                          std::move(camera_feature), structural,
+                          std::move(camera_feature),
+                          std::move(camera_intensity), structural,
+                          manhattan_image, manhattan_lidar,
                           std::move(points), std::move(cloud),
-                          std::move(geometry),
-                          std::move(structural_segments)});
+                          std::move(geometry), std::move(signal),
+                          std::move(structural_segments),
+                          std::move(occlusion_segments)});
+    }
+    std::vector<std::vector<StructuralLineSegment3d>> occlusion_observations;
+    occlusion_observations.reserve(prepared.size());
+    for (const auto &item : prepared)
+      occlusion_observations.push_back(item.occlusion_segments);
+    const auto persistent_occlusions =
+        retainPersistentLidarOcclusionSegments(occlusion_observations, config);
+    for (std::size_t i = 0; i < prepared.size(); ++i) {
+      prepared[i].structural_segments.insert(
+          prepared[i].structural_segments.end(),
+          persistent_occlusions[i].begin(), persistent_occlusions[i].end());
+      result.metrics.lidar_structural_segments +=
+          persistent_occlusions[i].size();
     }
 
     Parameters prior = toParameters(mechanical_prior), params = prior;
@@ -1605,6 +2683,11 @@ CalibrationResult calibrateExtrinsicMultiScene(
                                   observations.front().camera.k(0, 2),
                                   observations.front().camera.k(1, 2)};
     Intrinsics intrinsics = intrinsic_prior;
+    CalibrationConfig signal_nid_config = config;
+    signal_nid_config.range_geometry_nid_weight = 1.0;
+    signal_nid_config.normal_geometry_nid_weight = 0.0;
+    signal_nid_config.minimum_nid_feature_entropy_ratio =
+        config.minimum_signal_entropy_ratio;
     auto evaluate_edge_all = [&](const Parameters &parameters,
                                  const Intrinsics *camera_intrinsics) {
       Evaluation aggregate;
@@ -1627,7 +2710,9 @@ CalibrationResult calibrateExtrinsicMultiScene(
             evaluate(parameters, item.points, item.camera, item.distance,
                      camera_intrinsics, config.residual_cap_px,
                      config.enable_visibility_filter ? &visibility : nullptr,
-                     config.visibility_depth_tolerance_m);
+                     config.visibility_depth_tolerance_m,
+                     config.coverage_grid_rows,
+                     config.coverage_grid_columns);
         if (current.visible > 0) {
           aggregate.mean += current.mean * current.visible;
           aggregate.normalized_squared +=
@@ -1637,6 +2722,7 @@ CalibrationResult calibrateExtrinsicMultiScene(
         aggregate.in_frame += current.in_frame;
         aggregate.visible += current.visible;
         aggregate.occluded += current.occluded;
+        aggregate.active_spatial_cells += current.active_spatial_cells;
       }
       if (aggregate.visible > 0) {
         aggregate.mean /= static_cast<double>(aggregate.visible);
@@ -1664,43 +2750,50 @@ CalibrationResult calibrateExtrinsicMultiScene(
             camera_intrinsics, config.residual_cap_px,
             config.enable_visibility_filter ? &visibility : nullptr,
             config.visibility_depth_tolerance_m, config);
-        if (current.visible > 0) {
-          aggregate.mean += current.mean * current.visible;
+        if (current.score_weight > 0.0) {
+          aggregate.mean += current.mean * current.score_weight;
           aggregate.normalized_squared +=
-              current.normalized_squared * current.visible;
+              current.normalized_squared * current.score_weight;
+          aggregate.score_weight += current.score_weight;
         }
         aggregate.projected += current.projected;
         aggregate.in_frame += current.in_frame;
         aggregate.visible += current.visible;
         aggregate.occluded += current.occluded;
-        if (current.horizontal_visible > 0) {
+        if (current.horizontal_score_weight > 0.0) {
           aggregate.horizontal_normalized_squared +=
               current.horizontal_normalized_squared *
-              current.horizontal_visible;
+              current.horizontal_score_weight;
+          aggregate.horizontal_score_weight +=
+              current.horizontal_score_weight;
           aggregate.horizontal_visible += current.horizontal_visible;
+          aggregate.horizontal_projected += current.horizontal_projected;
         }
-        if (current.vertical_visible > 0) {
+        if (current.vertical_score_weight > 0.0) {
           aggregate.vertical_normalized_squared +=
-              current.vertical_normalized_squared * current.vertical_visible;
+              current.vertical_normalized_squared *
+              current.vertical_score_weight;
+          aggregate.vertical_score_weight += current.vertical_score_weight;
           aggregate.vertical_visible += current.vertical_visible;
+          aggregate.vertical_projected += current.vertical_projected;
         }
       }
-      if (aggregate.visible > 0) {
-        aggregate.mean /= static_cast<double>(aggregate.visible);
-        aggregate.normalized_squared /= static_cast<double>(aggregate.visible);
+      if (aggregate.score_weight > 0.0) {
+        aggregate.mean /= aggregate.score_weight;
+        aggregate.normalized_squared /= aggregate.score_weight;
       } else {
         aggregate.mean = config.residual_cap_px;
         aggregate.normalized_squared = 1.0;
       }
-      if (aggregate.horizontal_visible > 0)
+      if (aggregate.horizontal_score_weight > 0.0)
         aggregate.horizontal_normalized_squared /=
-            static_cast<double>(aggregate.horizontal_visible);
+            aggregate.horizontal_score_weight;
       else
         aggregate.horizontal_normalized_squared =
             std::numeric_limits<double>::infinity();
-      if (aggregate.vertical_visible > 0)
+      if (aggregate.vertical_score_weight > 0.0)
         aggregate.vertical_normalized_squared /=
-            static_cast<double>(aggregate.vertical_visible);
+            aggregate.vertical_score_weight;
       else
         aggregate.vertical_normalized_squared =
             std::numeric_limits<double>::infinity();
@@ -1712,6 +2805,9 @@ CalibrationResult calibrateExtrinsicMultiScene(
       aggregate.score = 0.0;
       aggregate.squared_score = 0.0;
       aggregate.projected = 0;
+      double range_score = 0.0, normal_score = 0.0;
+      double range_entropy = 0.0, normal_entropy = 0.0;
+      std::size_t range_scenes = 0, normal_scenes = 0;
       for (const auto &item : prepared) {
         const auto visibility = config.enable_visibility_filter
                                     ? buildVisibilityBuffer(
@@ -1721,16 +2817,108 @@ CalibrationResult calibrateExtrinsicMultiScene(
                                     : VisibilityBuffer{};
         const NidEvaluation current = normalizedInformationDistance(
             parameters.data(), item.geometry, item.camera, item.camera_feature,
-            config.nid_histogram_bins,
+            config,
             camera_intrinsics ? camera_intrinsics->data() : nullptr,
             config.enable_visibility_filter ? &visibility : nullptr,
             config.visibility_depth_tolerance_m);
         aggregate.score += current.score;
         aggregate.squared_score += current.squared_score;
         aggregate.projected += current.projected;
+        aggregate.active_spatial_cells += current.active_spatial_cells;
+        if (current.range_score >= 0.0) {
+          range_score += current.range_score;
+          range_entropy += current.range_entropy_ratio;
+          ++range_scenes;
+        }
+        if (current.normal_score >= 0.0) {
+          normal_score += current.normal_score;
+          normal_entropy += current.normal_entropy_ratio;
+          ++normal_scenes;
+        }
       }
       aggregate.score /= static_cast<double>(prepared.size());
       aggregate.squared_score /= static_cast<double>(prepared.size());
+      if (range_scenes > 0) {
+        aggregate.range_score = range_score / range_scenes;
+        aggregate.range_entropy_ratio = range_entropy / range_scenes;
+      }
+      if (normal_scenes > 0) {
+        aggregate.normal_score = normal_score / normal_scenes;
+        aggregate.normal_entropy_ratio = normal_entropy / normal_scenes;
+      }
+      return aggregate;
+    };
+    auto evaluate_signal_nmi_all = [&](const Parameters &parameters,
+                                       const Intrinsics *camera_intrinsics) {
+      NidEvaluation aggregate;
+      aggregate.score = 0.0;
+      aggregate.squared_score = 0.0;
+      double entropy = 0.0;
+      std::size_t active_scenes = 0;
+      for (const auto &item : prepared) {
+        const auto visibility = config.enable_visibility_filter
+                                    ? buildVisibilityBuffer(
+                                          parameters, item.cloud, item.camera,
+                                          camera_intrinsics,
+                                          config.coarse_visibility_scale)
+                                    : VisibilityBuffer{};
+        const auto current = normalizedInformationDistance(
+            parameters.data(), item.signal, item.camera,
+            item.camera_intensity, signal_nid_config,
+            camera_intrinsics ? camera_intrinsics->data() : nullptr,
+            config.enable_visibility_filter ? &visibility : nullptr,
+            config.visibility_depth_tolerance_m);
+        aggregate.score += current.score;
+        aggregate.squared_score += current.squared_score;
+        aggregate.projected += current.projected;
+        aggregate.active_spatial_cells += current.active_spatial_cells;
+        if (current.range_score >= 0.0) {
+          entropy += current.range_entropy_ratio;
+          ++active_scenes;
+        }
+      }
+      aggregate.score /= static_cast<double>(prepared.size());
+      aggregate.squared_score /= static_cast<double>(prepared.size());
+      if (active_scenes > 0)
+        aggregate.range_entropy_ratio = entropy / active_scenes;
+      return aggregate;
+    };
+    auto evaluate_manhattan_all = [&](const Parameters &parameters) {
+      ManhattanEvaluation aggregate;
+      aggregate.score = 0.0;
+      aggregate.vertical_error_rad = 0.0;
+      aggregate.horizontal_error_rad = 0.0;
+      std::size_t vertical_scenes = 0;
+      std::size_t horizontal_axes = 0;
+      for (const auto &item : prepared) {
+        const auto current = evaluateManhattanDirections(
+            parameters, item.manhattan_image, item.manhattan_lidar, config);
+        if (current.vertical_inliers == 0)
+          continue;
+        aggregate.score += current.score;
+        aggregate.vertical_error_rad += current.vertical_error_rad;
+        aggregate.vertical_inliers += current.vertical_inliers;
+        ++vertical_scenes;
+        if (current.horizontal_axes > 0) {
+          aggregate.horizontal_error_rad +=
+              current.horizontal_error_rad * current.horizontal_axes;
+          horizontal_axes += current.horizontal_axes;
+        }
+      }
+      if (vertical_scenes > 0) {
+        aggregate.score /= static_cast<double>(vertical_scenes);
+        aggregate.vertical_error_rad /= static_cast<double>(vertical_scenes);
+      } else {
+        aggregate.score = 1.0;
+        aggregate.vertical_error_rad =
+            std::numeric_limits<double>::infinity();
+      }
+      aggregate.horizontal_axes = horizontal_axes;
+      aggregate.horizontal_error_rad =
+          horizontal_axes > 0
+              ? aggregate.horizontal_error_rad /
+                    static_cast<double>(horizontal_axes)
+              : std::numeric_limits<double>::infinity();
       return aggregate;
     };
     const Intrinsics *active_initial_intrinsics =
@@ -1739,13 +2927,21 @@ CalibrationResult calibrateExtrinsicMultiScene(
         evaluate_edge_all(prior, active_initial_intrinsics);
     const NidEvaluation initial_nid =
         evaluate_nid_all(prior, active_initial_intrinsics);
+    const NidEvaluation initial_signal_nmi =
+        evaluate_signal_nmi_all(prior, active_initial_intrinsics);
     const Evaluation initial_line =
         evaluate_lines_all(prior, active_initial_intrinsics);
+    const ManhattanEvaluation initial_manhattan =
+        evaluate_manhattan_all(prior);
     result.metrics.initial_mean_edge_distance_px = initial_edge.mean;
     result.metrics.initial_nid = initial_nid.score;
     result.metrics.initial_composite_objective =
-        compositeObjective(initial_edge, initial_nid, initial_line, config,
+        compositeObjective(initial_edge, initial_nid, initial_signal_nmi,
+                           initial_line,
+                           initial_manhattan, config,
                            directionPriorObjective(prior, config));
+    result.metrics.initial_manhattan_objective = initial_manhattan.score;
+    result.metrics.initial_signal_nmi = initial_signal_nmi.score;
 
     struct Start {
       Parameters parameters;
@@ -1755,14 +2951,23 @@ CalibrationResult calibrateExtrinsicMultiScene(
       std::size_t edge_visible = 0;
       std::size_t edge_occluded = 0;
       std::size_t nid_projected = 0;
+      std::size_t signal_nmi_projected = 0;
       double edge_objective = 0.0;
       double nid_objective = 0.0;
+      double signal_nmi_objective = 0.0;
       double line_objective = 0.0;
       double horizontal_line_objective = 0.0;
       double vertical_line_objective = 0.0;
+      double manhattan_objective = 0.0;
       double direction_objective = 0.0;
       std::size_t horizontal_line_segments = 0;
       std::size_t vertical_line_segments = 0;
+      std::size_t edge_active_spatial_cells = 0;
+      std::size_t structural_visible_segments = 0;
+      double edge_coverage_ratio = 1.0;
+      double nid_coverage_ratio = 1.0;
+      double edge_spatial_coverage_ratio = 1.0;
+      double coverage_objective = 0.0;
     };
     std::vector<Start> starts;
     if (config.coarse_yaw_span_rad > 0.0 || config.use_coarse_yaw_bounds) {
@@ -1788,34 +2993,63 @@ CalibrationResult calibrateExtrinsicMultiScene(
             evaluate_edge_all(candidate_parameters, active_initial_intrinsics);
         const NidEvaluation nid =
             evaluate_nid_all(candidate_parameters, active_initial_intrinsics);
+        const NidEvaluation signal_nmi = evaluate_signal_nmi_all(
+            candidate_parameters, active_initial_intrinsics);
         const Evaluation line =
             evaluate_lines_all(candidate_parameters, active_initial_intrinsics);
+        const ManhattanEvaluation manhattan =
+            evaluate_manhattan_all(candidate_parameters);
         starts.push_back({candidate_parameters, offset,
                           compositeObjective(
-                              edge, nid, line, config,
+                              edge, nid, signal_nmi, line, manhattan, config,
                               directionPriorObjective(candidate_parameters,
                                                       config)),
                           edge.in_frame, edge.visible, edge.occluded,
-                          nid.projected, edge.normalized_squared,
-                          nid.squared_score, line.normalized_squared,
+                          nid.projected, signal_nmi.projected,
+                          edge.normalized_squared,
+                          nid.squared_score, signal_nmi.squared_score,
+                          line.normalized_squared,
                           line.horizontal_normalized_squared,
                           line.vertical_normalized_squared,
+                          manhattan.score,
                           directionPriorObjective(candidate_parameters,
                                                   config),
-                          line.horizontal_visible, line.vertical_visible});
+                          line.horizontal_projected,
+                          line.vertical_projected,
+                          edge.active_spatial_cells,
+                          line.visible});
       }
     } else {
       starts.push_back({prior, 0.0, result.metrics.initial_composite_objective,
                         initial_edge.in_frame, initial_edge.visible,
                         initial_edge.occluded, initial_nid.projected,
-                        initial_edge.normalized_squared, initial_nid.squared_score,
+                        initial_signal_nmi.projected,
+                        initial_edge.normalized_squared,
+                        initial_nid.squared_score,
+                        initial_signal_nmi.squared_score,
                         initial_line.normalized_squared,
                         initial_line.horizontal_normalized_squared,
                         initial_line.vertical_normalized_squared,
+                        initial_manhattan.score,
                         directionPriorObjective(prior, config),
-                        initial_line.horizontal_visible,
-                        initial_line.vertical_visible});
+                        initial_line.horizontal_projected,
+                        initial_line.vertical_projected,
+                        initial_edge.active_spatial_cells,
+                        initial_line.visible});
     }
+    const auto maximum_start = [](const std::vector<Start> &values,
+                                  auto member) {
+      std::size_t maximum = 0;
+      for (const auto &value : values)
+        maximum = std::max(maximum, static_cast<std::size_t>(value.*member));
+      return maximum;
+    };
+    const std::size_t maximum_edge_visible =
+        maximum_start(starts, &Start::edge_visible);
+    const std::size_t maximum_nid_projected =
+        maximum_start(starts, &Start::nid_projected);
+    const std::size_t maximum_edge_active_cells =
+        maximum_start(starts, &Start::edge_active_spatial_cells);
     result.coarse_orientation_scores.reserve(starts.size());
     for (auto &start : starts) {
       // The scan covers 360 degrees while a camera sees only one sector, so a
@@ -1825,20 +3059,58 @@ CalibrationResult calibrateExtrinsicMultiScene(
           std::max<std::size_t>(100, config.minimum_lidar_edge_points);
       const std::size_t minimum_nid_overlap =
           config.minimum_nid_projected_points * prepared.size();
+      const std::size_t minimum_signal_overlap =
+          config.minimum_signal_nmi_projected_points * prepared.size();
+      start.edge_coverage_ratio =
+          maximum_edge_visible > 0
+              ? static_cast<double>(start.edge_visible) /
+                    maximum_edge_visible
+              : 0.0;
+      start.nid_coverage_ratio =
+          maximum_nid_projected > 0
+              ? static_cast<double>(start.nid_projected) /
+                    maximum_nid_projected
+              : 0.0;
+      start.edge_spatial_coverage_ratio =
+          maximum_edge_active_cells > 0
+              ? static_cast<double>(start.edge_active_spatial_cells) /
+                    maximum_edge_active_cells
+              : 0.0;
+      const double edge_penalty =
+          std::pow(1.0 - start.edge_coverage_ratio, 2.0);
+      const double nid_penalty =
+          std::pow(1.0 - start.nid_coverage_ratio, 2.0);
+      const double spatial_penalty =
+          std::pow(1.0 - start.edge_spatial_coverage_ratio, 2.0);
+      start.coverage_objective =
+          (edge_penalty + nid_penalty + spatial_penalty) / 3.0;
+      start.objective += config.coverage_penalty_weight *
+                         start.coverage_objective;
       const bool overlap_valid =
           start.edge_visible >= minimum_edge_overlap &&
-          start.nid_projected >= minimum_nid_overlap;
+          start.nid_projected >= minimum_nid_overlap &&
+          start.nid_coverage_ratio >= config.minimum_relative_nid_coverage &&
+          start.edge_spatial_coverage_ratio >=
+              config.minimum_relative_edge_spatial_coverage &&
+          (config.signal_nmi_weight <= 0.0 ||
+           start.signal_nmi_projected >= minimum_signal_overlap);
       if (!overlap_valid)
         start.objective = std::numeric_limits<double>::infinity();
       result.coarse_orientation_scores.push_back(
           {start.yaw_offset * kRadToDeg, start.objective,
-           start.edge_objective, start.nid_objective, start.line_objective,
+           start.edge_objective, start.nid_objective,
+           start.signal_nmi_objective, start.line_objective,
            start.horizontal_line_objective,
            start.vertical_line_objective,
+           start.manhattan_objective,
            start.direction_objective,
            start.edge_in_frame, start.edge_visible, start.edge_occluded,
-           start.nid_projected, start.horizontal_line_segments,
-           start.vertical_line_segments, overlap_valid});
+           start.nid_projected, start.signal_nmi_projected,
+           start.horizontal_line_segments,
+           start.vertical_line_segments, start.edge_active_spatial_cells,
+           start.structural_visible_segments, start.edge_coverage_ratio,
+           start.nid_coverage_ratio, start.edge_spatial_coverage_ratio,
+           start.coverage_objective, overlap_valid});
     }
     std::sort(starts.begin(), starts.end(), [](const Start &a, const Start &b) {
       return a.objective < b.objective;
@@ -1877,6 +3149,7 @@ CalibrationResult calibrateExtrinsicMultiScene(
     struct VisiblePrepared {
       std::vector<Eigen::Vector3d> points;
       std::vector<GeometryFeature> geometry;
+      std::vector<GeometryFeature> signal;
       std::vector<LidarLineSegment> structural_segments;
     };
     std::vector<VisiblePrepared> visible_prepared;
@@ -1900,6 +3173,12 @@ CalibrationResult calibrateExtrinsicMultiScene(
                          config.enable_visibility_filter ? &visibility : nullptr,
                          config.visibility_depth_tolerance_m))
           visible_item.geometry.push_back(feature);
+      for (const auto &feature : item.signal)
+        if (visiblePoint(params, feature.point, item.camera,
+                         active_initial_intrinsics,
+                         config.enable_visibility_filter ? &visibility : nullptr,
+                         config.visibility_depth_tolerance_m))
+          visible_item.signal.push_back(feature);
       for (const auto &segment : item.structural_segments)
         if (visiblePoint(params, 0.5 * (segment.a + segment.b), item.camera,
                          active_initial_intrinsics,
@@ -1909,12 +3188,18 @@ CalibrationResult calibrateExtrinsicMultiScene(
       visible_prepared.push_back(std::move(visible_item));
     }
 
+    ceres::Solver::Summary summary;
+    const Parameters refinement_prior = params;
+    Intrinsics lower = intrinsic_prior, upper = intrinsic_prior;
+    if (config.enable_ceres_refinement) {
     ceres::Problem problem;
     const double edge_scale = std::sqrt(config.edge_alignment_weight) /
                               (std::max(1.0, config.residual_cap_px) *
                                std::sqrt(static_cast<double>(total_points)));
     const double nid_scale = std::sqrt(
         config.normalized_information_distance_weight / prepared.size());
+    const double signal_nmi_scale =
+        std::sqrt(config.signal_nmi_weight / prepared.size());
     for (std::size_t prepared_index = 0; prepared_index < prepared.size();
          ++prepared_index) {
       const auto &item = prepared[prepared_index];
@@ -1940,7 +3225,7 @@ CalibrationResult calibrateExtrinsicMultiScene(
         auto *nid_cost =
             new ceres::DynamicNumericDiffCostFunction<NidCost, ceres::CENTRAL>(
                 new NidCost{visible_item.geometry, item.camera,
-                            item.camera_feature, config.nid_histogram_bins, nid_scale,
+                            item.camera_feature, config, nid_scale,
                             config.optimize_camera_intrinsics});
         nid_cost->AddParameterBlock(6);
         if (config.optimize_camera_intrinsics)
@@ -1951,6 +3236,24 @@ CalibrationResult calibrateExtrinsicMultiScene(
                                    intrinsics.data());
         else
           problem.AddResidualBlock(nid_cost, nullptr, params.data());
+      }
+      if (config.signal_nmi_weight > 0.0) {
+        auto *signal_cost =
+            new ceres::DynamicNumericDiffCostFunction<NidCost,
+                                                      ceres::CENTRAL>(
+                new NidCost{visible_item.signal, item.camera,
+                            item.camera_intensity, signal_nid_config,
+                            signal_nmi_scale,
+                            config.optimize_camera_intrinsics});
+        signal_cost->AddParameterBlock(6);
+        if (config.optimize_camera_intrinsics)
+          signal_cost->AddParameterBlock(4);
+        signal_cost->SetNumResiduals(1);
+        if (config.optimize_camera_intrinsics)
+          problem.AddResidualBlock(signal_cost, nullptr, params.data(),
+                                   intrinsics.data());
+        else
+          problem.AddResidualBlock(signal_cost, nullptr, params.data());
       }
       if (config.structural_line_weight > 0.0 &&
           !visible_item.structural_segments.empty()) {
@@ -1972,6 +3275,19 @@ CalibrationResult calibrateExtrinsicMultiScene(
         else
           problem.AddResidualBlock(line_cost, nullptr, params.data());
       }
+      if (config.manhattan_direction_weight > 0.0 &&
+          item.manhattan_image.vertical.inliers > 0) {
+        auto *manhattan_cost =
+            new ceres::DynamicNumericDiffCostFunction<ManhattanCost,
+                                                      ceres::CENTRAL>(
+                new ManhattanCost{
+                    item.manhattan_image, item.manhattan_lidar, config,
+                    std::sqrt(config.manhattan_direction_weight /
+                              prepared.size())});
+        manhattan_cost->AddParameterBlock(6);
+        manhattan_cost->SetNumResiduals(1);
+        problem.AddResidualBlock(manhattan_cost, nullptr, params.data());
+      }
     }
     if (config.camera_direction_prior_weight > 0.0 &&
         (config.expected_camera_forward_lidar.norm() > 1e-9 ||
@@ -1991,7 +3307,6 @@ CalibrationResult calibrateExtrinsicMultiScene(
       direction_cost->SetNumResiduals(6);
       problem.AddResidualBlock(direction_cost, nullptr, params.data());
     }
-    const Parameters refinement_prior = params;
     auto *prior_cost = new ceres::AutoDiffCostFunction<PriorCost, 6, 6>(
         new PriorCost{refinement_prior, config.rotation_prior_sigma_rad,
                       config.translation_prior_sigma_m, config.prior_weight,
@@ -2019,7 +3334,6 @@ CalibrationResult calibrateExtrinsicMultiScene(
       problem.SetParameterUpperBound(params.data(), i, bound_center + bound);
     }
 
-    Intrinsics lower = intrinsic_prior, upper = intrinsic_prior;
     if (config.optimize_camera_intrinsics) {
       const double focal_sigma =
           std::max(0.05, config.focal_length_relative_bound * 0.5);
@@ -2058,8 +3372,10 @@ CalibrationResult calibrateExtrinsicMultiScene(
     options.linear_solver_type = ceres::DENSE_QR;
     options.num_threads = 1;
     options.minimizer_progress_to_stdout = false;
-    ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
+    } else {
+      result.solver_summary = "Ceres disabled: coarse score map only";
+    }
 
     const Intrinsics *active_final_intrinsics =
         config.optimize_camera_intrinsics ? &intrinsics : nullptr;
@@ -2067,10 +3383,15 @@ CalibrationResult calibrateExtrinsicMultiScene(
         evaluate_edge_all(params, active_final_intrinsics);
     const NidEvaluation final_nid =
         evaluate_nid_all(params, active_final_intrinsics);
+    const NidEvaluation final_signal_nmi =
+        evaluate_signal_nmi_all(params, active_final_intrinsics);
     const Evaluation final_line =
         evaluate_lines_all(params, active_final_intrinsics);
+    const ManhattanEvaluation final_manhattan =
+        evaluate_manhattan_all(params);
     const Transform candidate = fromParameters(params);
     result.candidate_t_camera_lidar = candidate;
+    result.candidate_available = true;
     const CameraModel candidate_camera =
         withIntrinsics(observations.front().camera, intrinsics);
     result.candidate_camera = candidate_camera;
@@ -2088,10 +3409,39 @@ CalibrationResult calibrateExtrinsicMultiScene(
                                                final_edge.projected) /
                                                final_edge.visible
                                          : 0.0;
+    result.metrics.max_coarse_visible_edge_points = maximum_edge_visible;
+    result.metrics.max_coarse_nid_projected_points = maximum_nid_projected;
+    result.metrics.max_coarse_edge_active_spatial_cells =
+        maximum_edge_active_cells;
+    result.metrics.edge_active_spatial_cells = final_edge.active_spatial_cells;
+    result.metrics.edge_coverage_ratio =
+        maximum_edge_visible > 0
+            ? static_cast<double>(final_edge.visible) / maximum_edge_visible
+            : 0.0;
+    result.metrics.nid_coverage_ratio =
+        maximum_nid_projected > 0
+            ? static_cast<double>(final_nid.projected) /
+                  maximum_nid_projected
+            : 0.0;
+    result.metrics.edge_spatial_coverage_ratio =
+        maximum_edge_active_cells > 0
+            ? static_cast<double>(final_edge.active_spatial_cells) /
+                  maximum_edge_active_cells
+            : 0.0;
+    result.metrics.coverage_objective =
+        (std::pow(1.0 - result.metrics.edge_coverage_ratio, 2.0) +
+         std::pow(1.0 - result.metrics.nid_coverage_ratio, 2.0) +
+         std::pow(1.0 - result.metrics.edge_spatial_coverage_ratio, 2.0)) /
+        3.0;
     result.metrics.nid_projected_points = final_nid.projected;
     result.metrics.visible_edge_points = final_edge.visible;
     result.metrics.occluded_edge_points = final_edge.occluded;
-    result.metrics.structural_projected_points = final_line.visible;
+    result.metrics.structural_visible_segments = final_line.visible;
+    result.metrics.structural_matched_segments = final_line.projected;
+    result.metrics.horizontal_structural_matches =
+        final_line.horizontal_projected;
+    result.metrics.vertical_structural_matches = final_line.vertical_projected;
+    result.metrics.structural_projected_points = final_line.projected;
     result.metrics.final_horizontal_structural_objective =
         std::isfinite(final_line.horizontal_normalized_squared)
             ? final_line.horizontal_normalized_squared
@@ -2100,11 +3450,41 @@ CalibrationResult calibrateExtrinsicMultiScene(
         std::isfinite(final_line.vertical_normalized_squared)
             ? final_line.vertical_normalized_squared
             : -1.0;
+    result.metrics.final_manhattan_objective = final_manhattan.score;
+    result.metrics.final_manhattan_vertical_error_deg =
+        std::isfinite(final_manhattan.vertical_error_rad)
+            ? final_manhattan.vertical_error_rad * kRadToDeg
+            : -1.0;
+    result.metrics.final_manhattan_horizontal_error_deg =
+        std::isfinite(final_manhattan.horizontal_error_rad)
+            ? final_manhattan.horizontal_error_rad * kRadToDeg
+            : -1.0;
+    result.metrics.manhattan_vertical_inliers =
+        final_manhattan.vertical_inliers;
+    result.metrics.manhattan_horizontal_axes = final_manhattan.horizontal_axes;
     result.metrics.final_mean_edge_distance_px = final_edge.mean;
     result.metrics.final_nid = final_nid.score;
+    result.metrics.final_signal_nmi = final_signal_nmi.score;
+    result.metrics.final_signal_entropy_ratio =
+        final_signal_nmi.range_entropy_ratio;
+    result.metrics.signal_nmi_projected_points =
+        final_signal_nmi.projected;
+    result.metrics.signal_nmi_active_spatial_cells =
+        final_signal_nmi.active_spatial_cells;
+    result.metrics.final_range_nid = final_nid.range_score;
+    result.metrics.final_normal_nid = final_nid.normal_score;
+    result.metrics.final_range_entropy_ratio =
+        final_nid.range_entropy_ratio;
+    result.metrics.final_normal_entropy_ratio =
+        final_nid.normal_entropy_ratio;
+    result.metrics.nid_active_spatial_cells =
+        final_nid.active_spatial_cells;
     result.metrics.final_composite_objective =
-        compositeObjective(final_edge, final_nid, final_line, config,
-                           directionPriorObjective(params, config));
+        compositeObjective(final_edge, final_nid, final_signal_nmi,
+                           final_line,
+                           final_manhattan, config,
+                           directionPriorObjective(params, config),
+                           result.metrics.coverage_objective);
     result.metrics.objective_improvement_ratio =
         result.metrics.initial_composite_objective > 0.0
             ? (result.metrics.initial_composite_objective -
@@ -2115,8 +3495,21 @@ CalibrationResult calibrateExtrinsicMultiScene(
         initial_nid.score > 0.0
             ? (initial_nid.score - final_nid.score) / initial_nid.score
             : 0.0;
+    result.metrics.signal_nmi_improvement_ratio =
+        initial_signal_nmi.score > 0.0
+            ? (initial_signal_nmi.score - final_signal_nmi.score) /
+                  initial_signal_nmi.score
+            : 0.0;
     result.metrics.solver_iterations = summary.iterations.size();
-    result.solver_summary = summary.BriefReport();
+    result.solver_summary = config.enable_ceres_refinement
+                                ? summary.BriefReport()
+                                : "Ceres disabled: coarse score map only";
+
+    if (!config.enable_ceres_refinement) {
+      result.state = "SCORE_MAP_ONLY";
+      result.reason_code = "COARSE_SCORE_ONLY";
+      return finish();
+    }
 
     bool intrinsic_at_bound = false;
     if (config.optimize_camera_intrinsics)
@@ -2129,6 +3522,8 @@ CalibrationResult calibrateExtrinsicMultiScene(
 
     const std::size_t minimum_nid_projection =
         config.minimum_nid_projected_points * observations.size();
+    const std::size_t minimum_signal_projection =
+        config.minimum_signal_nmi_projected_points * observations.size();
     if (!summary.IsSolutionUsable())
       result.reason_code = "OPTIMIZER_FAILED";
     else if (summary.termination_type == ceres::NO_CONVERGENCE)
@@ -2136,8 +3531,37 @@ CalibrationResult calibrateExtrinsicMultiScene(
     else if (config.normalized_information_distance_weight > 0.0 &&
              final_nid.projected < minimum_nid_projection)
       result.reason_code = "NID_OVERLAP_INSUFFICIENT";
+    else if (result.metrics.nid_coverage_ratio <
+                 config.minimum_relative_nid_coverage ||
+             result.metrics.edge_spatial_coverage_ratio <
+                 config.minimum_relative_edge_spatial_coverage)
+      result.reason_code = "RELATIVE_COVERAGE_INSUFFICIENT";
+    else if (config.normalized_information_distance_weight > 0.0 &&
+             final_nid.active_spatial_cells <
+                 config.minimum_nid_active_spatial_cells *
+                     observations.size())
+      result.reason_code = "NID_SPATIAL_ENTROPY_INSUFFICIENT";
+    else if (config.signal_nmi_weight > 0.0 &&
+             final_signal_nmi.projected < minimum_signal_projection)
+      result.reason_code = "SIGNAL_NMI_OVERLAP_INSUFFICIENT";
+    else if (config.signal_nmi_weight > 0.0 &&
+             final_signal_nmi.active_spatial_cells <
+                 config.minimum_signal_nmi_active_spatial_cells *
+                     observations.size())
+      result.reason_code = "SIGNAL_NMI_ENTROPY_INSUFFICIENT";
+    else if (config.manhattan_direction_weight > 0.0 &&
+             final_manhattan.vertical_inliers <
+                 config.minimum_manhattan_vertical_inliers *
+                     observations.size())
+      result.reason_code = "MANHATTAN_VERTICAL_SUPPORT_INSUFFICIENT";
+    else if (config.manhattan_direction_weight > 0.0 &&
+             config.maximum_manhattan_vertical_error_rad > 0.0 &&
+             (!std::isfinite(final_manhattan.vertical_error_rad) ||
+              final_manhattan.vertical_error_rad >
+                  config.maximum_manhattan_vertical_error_rad))
+      result.reason_code = "MANHATTAN_VERTICAL_ALIGNMENT_POOR";
     else if (config.structural_line_weight > 0.0 &&
-             final_line.visible <
+             final_line.projected <
                  config.minimum_projected_structural_segments)
       result.reason_code = "STRUCTURAL_OVERLAP_INSUFFICIENT";
     else if (result.metrics.multistart_objective_margin <
@@ -2153,6 +3577,10 @@ CalibrationResult calibrateExtrinsicMultiScene(
     else if (result.metrics.nid_improvement_ratio <
              config.minimum_nid_improvement_ratio)
       result.reason_code = "NID_IMPROVEMENT_INSUFFICIENT";
+    else if (config.signal_nmi_weight > 0.0 &&
+             result.metrics.signal_nmi_improvement_ratio <
+                 config.minimum_signal_nmi_improvement_ratio)
+      result.reason_code = "SIGNAL_NMI_IMPROVEMENT_INSUFFICIENT";
     else if (intrinsic_at_bound)
       result.reason_code = "INTRINSIC_BOUND_REACHED";
     else if (prior_update.rotation_deg >
@@ -2163,6 +3591,8 @@ CalibrationResult calibrateExtrinsicMultiScene(
       result.estimated_t_camera_lidar = candidate;
       result.estimated_camera = candidate_camera;
       result.success = true;
+      result.internal_gate_pass = true;
+      result.state = "INTERNAL_GATE_PASS";
       result.reason_code = "PASS";
     }
   } catch (const std::exception &e) {

@@ -75,6 +75,32 @@ auto_calib::Scan makeFragmentedHorizontalScan() {
     }
   return scan;
 }
+auto_calib::Scan makeGrazingPlaneScan() {
+  auto_calib::Scan scan;
+  scan.config.rows = 20;
+  scan.config.columns = 20;
+  scan.points.resize(static_cast<std::size_t>(scan.config.rows) *
+                     scan.config.columns);
+  for (std::uint32_t row = 0; row < scan.config.rows; ++row)
+    for (std::uint32_t column = 0; column < scan.config.columns; ++column) {
+      const double pan = 0.10 + 0.40 * column / (scan.config.columns - 1);
+      const double tilt =
+          -0.20 + 0.40 * row / (scan.config.rows - 1);
+      const Eigen::Vector3d direction = ray(pan, tilt);
+      const double range = 1.0 / direction.x();
+      auto &point = scan.points[static_cast<std::size_t>(row) *
+                                    scan.config.columns +
+                                column];
+      point.xyz = (range * direction).cast<float>();
+      point.range = static_cast<float>(range);
+      point.row = row;
+      point.column = column;
+      point.flags = auto_calib::kValidRange;
+      ++scan.valid_count;
+    }
+  scan.source_count = scan.valid_count;
+  return scan;
+}
 } // namespace
 int main() {
   try {
@@ -109,6 +135,60 @@ int main() {
                                                        plane_cfg)
                  .empty(),
             "Range-discontinuity diagnostic edge missing");
+    auto one_plane_cfg = plane_cfg;
+    one_plane_cfg.minimum_lidar_plane_points = 470;
+    const auto one_plane_segmentation =
+        auto_calib::segmentLidarPlanes(corner_scan, one_plane_cfg);
+    const auto plane_boundaries =
+        auto_calib::extractLidarPlaneBoundarySegments(
+            corner_scan, one_plane_segmentation, one_plane_cfg);
+    require(one_plane_segmentation.planes.size() == 1,
+            "Plane-boundary fixture did not retain exactly one plane");
+    require(!plane_boundaries.empty(),
+            "Accepted-plane boundary structural edge missing");
+    require(plane_boundaries.front().source ==
+                auto_calib::StructuralLineSource::PlaneBoundary &&
+                std::abs((plane_boundaries.front().b -
+                          plane_boundaries.front().a)
+                             .normalized()
+                             .y()) > 0.9,
+            "Plane-boundary segment metadata or direction is incorrect");
+
+    std::vector<std::vector<auto_calib::StructuralLineSegment3d>>
+        occlusion_observations(4);
+    for (std::size_t observation = 0; observation < 4; ++observation) {
+      const double jitter = static_cast<double>(observation) * 0.005;
+      occlusion_observations[observation].push_back(
+          {{jitter, 0.0, 2.0}, {jitter, 1.0, 2.0},
+           auto_calib::StructuralLineSource::OcclusionCandidate, 1.0, 1});
+      occlusion_observations[observation].push_back(
+          {{1.0 + observation, 0.0, 1.0},
+           {1.0 + observation, 0.5, 1.0},
+           auto_calib::StructuralLineSource::OcclusionCandidate, 1.0, 1});
+    }
+    auto persistence_cfg = plane_cfg;
+    persistence_cfg.minimum_persistent_occlusion_observations = 3;
+    persistence_cfg.minimum_persistent_occlusion_observation_ratio = 0.75;
+    const auto persistent =
+        auto_calib::retainPersistentLidarOcclusionSegments(
+            occlusion_observations, persistence_cfg);
+    require(std::all_of(persistent.begin(), persistent.end(),
+                        [](const auto &segments) {
+                          return segments.size() == 1 &&
+                                 segments.front().source ==
+                                     auto_calib::StructuralLineSource::
+                                         PersistentOcclusion &&
+                                 segments.front().support_observations == 4;
+                        }),
+            "Persistent occlusion filtering retained transient segments");
+    occlusion_observations.resize(2);
+    const auto insufficient_persistence =
+        auto_calib::retainPersistentLidarOcclusionSegments(
+            occlusion_observations, persistence_cfg);
+    require(std::all_of(insufficient_persistence.begin(),
+                        insufficient_persistence.end(),
+                        [](const auto &segments) { return segments.empty(); }),
+            "Persistent occlusion gate accepted too few observations");
     auto fragmented_cfg = plane_cfg;
     fragmented_cfg.minimum_lidar_plane_points = 100;
     const auto fragmented_scan = makeFragmentedPlaneScan();
@@ -156,6 +236,36 @@ int main() {
     cfg.minimum_camera_edge_pixels = 10;
     auto edges = auto_calib::extractLidarEdgePoints(scan, cfg);
     require(edges.size() > 20, "LiDAR edges missing");
+    auto grazing_plane = makeGrazingPlaneScan();
+    auto grazing_cfg = cfg;
+    grazing_cfg.lidar_edge_absolute_threshold_m = 0.02;
+    grazing_cfg.lidar_edge_relative_threshold = 0.0;
+    const auto grazing_segmentation =
+        auto_calib::segmentLidarPlanes(grazing_plane, grazing_cfg);
+    std::size_t grazing_raw_threshold_crossings = 0;
+    for (std::uint32_t row = 0; row < grazing_plane.config.rows; ++row)
+      for (std::uint32_t column = 0;
+           column + 1 < grazing_plane.config.columns; ++column) {
+        const auto index = static_cast<std::size_t>(row) *
+                               grazing_plane.config.columns +
+                           column;
+        grazing_raw_threshold_crossings += static_cast<std::size_t>(
+            std::abs(grazing_plane.points[index].range -
+                     grazing_plane.points[index + 1].range) >
+            grazing_cfg.lidar_edge_absolute_threshold_m);
+      }
+    require(grazing_raw_threshold_crossings > 100,
+            "Grazing-plane regression fixture has no raw false edges");
+    const auto grazing_edges = auto_calib::extractLidarEdgePoints(
+        grazing_plane, grazing_segmentation, grazing_cfg);
+    require(grazing_edges.empty(),
+            "Coplanar grazing-range changes were misclassified as edges");
+    auto invalid_edge_cfg = grazing_cfg;
+    invalid_edge_cfg.lidar_edge_minimum_local_contrast_ratio = 0.5;
+    auto invalid_edge_result = auto_calib::calibrateExtrinsic(
+        {}, {}, grazing_plane, {}, invalid_edge_cfg);
+    require(invalid_edge_result.reason_code == "INVALID_LIDAR_EDGE_CONFIG",
+            "Invalid LiDAR edge configuration was not rejected");
     auto_calib::CameraModel camera;
     camera.width = 400;
     camera.height = 400;
@@ -184,19 +294,134 @@ int main() {
     auto multi =
         auto_calib::calibrateExtrinsicMultiScene(observations, initial, cfg);
     require(multi.success, "Multi-scene calibration failed");
+    auto invalid_coverage_cfg = cfg;
+    invalid_coverage_cfg.minimum_relative_nid_coverage = 1.1;
+    const auto invalid_coverage_result =
+        auto_calib::calibrateExtrinsicMultiScene(observations, initial,
+                                                 invalid_coverage_cfg);
+    require(!invalid_coverage_result.success &&
+                invalid_coverage_result.reason_code ==
+                    "INVALID_COVERAGE_CONFIG",
+            "Invalid relative coverage configuration was not rejected");
     auto joint_intrinsics = cfg;
     joint_intrinsics.optimize_camera_intrinsics = true;
+    joint_intrinsics.enable_experimental_joint_intrinsics = true;
     joint_intrinsics.minimum_intrinsic_observations = 3;
+    auto blocked_joint_intrinsics = cfg;
+    blocked_joint_intrinsics.optimize_camera_intrinsics = true;
+    blocked_joint_intrinsics.minimum_intrinsic_observations = 3;
+    const auto blocked_joint = auto_calib::calibrateExtrinsicMultiScene(
+        observations, initial, blocked_joint_intrinsics);
+    require(!blocked_joint.success &&
+                blocked_joint.reason_code ==
+                    "JOINT_INTRINSIC_EXPERIMENTAL_DISABLED",
+            "Joint intrinsic research path was not disabled by default");
     auto insufficient_intrinsics = auto_calib::calibrateExtrinsicMultiScene(
         observations, initial, joint_intrinsics);
     require(!insufficient_intrinsics.success &&
                 insufficient_intrinsics.reason_code ==
                     "INTRINSIC_OBSERVATIONS_INSUFFICIENT",
             "Joint intrinsic observation gate failed");
+    auto score_map_only = cfg;
+    score_map_only.enable_ceres_refinement = false;
+    const auto score_map_result = auto_calib::calibrateExtrinsicMultiScene(
+        observations, initial, score_map_only);
+    require(!score_map_result.success && score_map_result.candidate_available &&
+                score_map_result.state == "SCORE_MAP_ONLY" &&
+                score_map_result.reason_code == "COARSE_SCORE_ONLY",
+            "Coarse score-map mode did not stop before Ceres");
     require(multi.metrics.lidar_geometry_points > 0 &&
                 multi.metrics.nid_projected_points > 0 &&
                 std::isfinite(multi.metrics.final_nid),
             "Geometry NID path was not evaluated");
+    require(multi.metrics.final_range_nid >= 0.0 &&
+                multi.metrics.final_normal_nid >= 0.0 &&
+                multi.metrics.nid_active_spatial_cells >= 2,
+            "Range/normal spatial NID channels were not both evaluated");
+    require(multi.metrics.edge_active_spatial_cells > 0 &&
+                multi.metrics.max_coarse_visible_edge_points >=
+                    multi.metrics.visible_edge_points &&
+                multi.metrics.max_coarse_nid_projected_points >=
+                    multi.metrics.nid_projected_points &&
+                multi.metrics.edge_coverage_ratio > 0.0 &&
+                multi.metrics.nid_coverage_ratio > 0.0 &&
+                multi.metrics.edge_spatial_coverage_ratio > 0.0,
+            "Relative edge/NID/spatial coverage diagnostics were not evaluated");
+    require(multi.metrics.structural_matched_segments <=
+                multi.metrics.structural_visible_segments &&
+                multi.metrics.structural_projected_points ==
+                    multi.metrics.structural_matched_segments,
+            "Structural one-to-one match metrics are inconsistent");
+    const auto scene_metrics = auto_calib::evaluateCalibrationPoseScenes(
+        observations, multi.candidate_t_camera_lidar, cfg);
+    require(scene_metrics.size() == observations.size() &&
+                std::all_of(scene_metrics.begin(), scene_metrics.end(),
+                            [](const auto &metrics) {
+                              return metrics.visible_edge_points > 0 &&
+                                     metrics.nid_projected_points > 0 &&
+                                     std::isfinite(
+                                         metrics.mean_edge_distance_px);
+                            }),
+            "Fixed-pose per-scene validation metrics were not evaluated");
+    auto signal_scan = scan;
+    cv::Mat signal_image(400, 400, CV_8UC3);
+    for (int v = 0; v < signal_image.rows; ++v)
+      for (int u = 0; u < signal_image.cols; ++u) {
+        const auto intensity = static_cast<unsigned char>(
+            255.0 * u / (signal_image.cols - 1));
+        signal_image.at<cv::Vec3b>(v, u) =
+            cv::Vec3b(intensity, intensity, intensity);
+      }
+    cv::rectangle(signal_image, {15, 15}, {384, 384}, {255, 255, 255}, 3,
+                  cv::LINE_AA);
+    for (auto &point : signal_scan.points)
+      if (point.valid()) {
+        const double normalized_pan =
+            (point.pan - sc.pan_min) / (sc.pan_max - sc.pan_min);
+        point.signal_strength =
+            static_cast<float>(1000.0 * std::exp(2.0 * normalized_pan));
+      }
+    auto signal_cfg = cfg;
+    signal_cfg.signal_nmi_weight = 0.15;
+    signal_cfg.minimum_signal_nmi_projected_points = 50;
+    signal_cfg.minimum_signal_entropy_ratio = 0.01;
+    signal_cfg.minimum_signal_nmi_improvement_ratio = -1.0;
+    std::vector<auto_calib::CalibrationObservation> signal_observations = {
+        {signal_image, camera, signal_scan},
+        {signal_image, camera, signal_scan}};
+    const auto signal_result = auto_calib::calibrateExtrinsicMultiScene(
+        signal_observations, {}, signal_cfg);
+    require(signal_result.metrics.lidar_signal_points > 100 &&
+                signal_result.metrics.signal_nmi_projected_points >= 100 &&
+                signal_result.metrics.signal_nmi_active_spatial_cells >= 2 &&
+                signal_result.metrics.final_signal_nmi < 1.0,
+            "Corrected signal-strength NMI path was not evaluated");
+    cv::Mat manhattan_image = image.clone();
+    for (int x = 70; x <= 330; x += 65)
+      cv::line(manhattan_image, {x, 40}, {x, 360}, {255, 255, 255}, 3,
+               cv::LINE_AA);
+    std::vector<auto_calib::CalibrationObservation> manhattan_observations = {
+        {manhattan_image, camera, scan}, {manhattan_image, camera, scan},
+        {manhattan_image, camera, scan}};
+    auto manhattan_cfg = cfg;
+    manhattan_cfg.manhattan_direction_weight = 0.25;
+    manhattan_cfg.minimum_manhattan_vertical_inliers = 3;
+    manhattan_cfg.maximum_manhattan_vertical_error_rad =
+        10.0 * 3.14159265358979323846 / 180.0;
+    const auto vanishing_diagnostics =
+        auto_calib::detectManhattanVanishingDirections(
+            manhattan_image, camera, manhattan_cfg);
+    require(!vanishing_diagnostics.empty() &&
+                vanishing_diagnostics.front().inliers >= 3,
+            "Manhattan vanishing-direction diagnostics were not retained");
+    const auto manhattan_result = auto_calib::calibrateExtrinsicMultiScene(
+        manhattan_observations, initial, manhattan_cfg);
+    require(manhattan_result.metrics.manhattan_vertical_inliers >= 9 &&
+                manhattan_result.metrics.final_manhattan_vertical_error_deg >=
+                    0.0 &&
+                manhattan_result.metrics.final_manhattan_vertical_error_deg <
+                    10.0,
+            "Manhattan gravity/vertical-line constraint was not evaluated");
     auto multistart_cfg = cfg;
     multistart_cfg.coarse_yaw_span_rad = 3.14159265358979323846;
     multistart_cfg.coarse_yaw_step_rad = 0.7853981633974483;
@@ -232,6 +457,24 @@ int main() {
     require(recovered_heading.metrics.final_composite_objective <=
                 recovered_heading.metrics.initial_composite_objective,
             "Yaw multi-start did not improve the composite objective");
+    if (!recovered_heading.success)
+      std::cerr << "Yaw recovery reason=" << recovered_heading.reason_code
+                << " edges=" << recovered_heading.metrics.lidar_edge_points
+                << " edge_mean="
+                << recovered_heading.metrics.final_mean_edge_distance_px
+                << " nid_improvement="
+                << recovered_heading.metrics.nid_improvement_ratio
+                << " candidate_delta="
+                << auto_calib::calculatePoseError(
+                       recovered_heading.candidate_t_camera_lidar,
+                       wrong_heading)
+                       .translation_m
+                << "m/"
+                << auto_calib::calculatePoseError(
+                       recovered_heading.candidate_t_camera_lidar,
+                       wrong_heading)
+                       .rotation_deg
+                << "deg\n";
     require(recovered_heading.success,
             "Yaw multi-start failed to recover a valid heading");
     const Eigen::Vector3d recovered_forward =
@@ -279,6 +522,7 @@ int main() {
             "Joint intrinsic estimate is invalid");
     auto strict_objective = cfg;
     strict_objective.minimum_objective_improvement_ratio = 1.0;
+    strict_objective.maximum_solver_iterations = 100;
     auto rejected_objective = auto_calib::calibrateExtrinsicMultiScene(
         observations, initial, strict_objective);
     require(!rejected_objective.success &&
