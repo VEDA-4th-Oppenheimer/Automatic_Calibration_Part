@@ -39,3 +39,4 @@ ctest --test-dir build --output-on-failure
 - 비교 프로토콜: [`manual_calibration/docs/COMPARISON_PROTOCOL.md`](manual_calibration/docs/COMPARISON_PROTOCOL.md)
 - 공용 Top-View GUI: [`top_view_gui/README.md`](top_view_gui/README.md)
 - 개발환경 가이드: [`docs/DEVELOPMENT_ENVIRONMENT.md`](docs/DEVELOPMENT_ENVIRONMENT.md)
+- OpenSDK RT 통합 인계서: [`automatic_calibration/docs/OPENSDK_RT_INTEGRATION_HANDOFF.md`](automatic_calibration/docs/OPENSDK_RT_INTEGRATION_HANDOFF.md)
