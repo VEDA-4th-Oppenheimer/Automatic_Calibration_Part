@@ -2,6 +2,7 @@
 #include <cassert>
 #include <cmath>
 #include <iostream>
+#include <opencv2/imgproc.hpp>
 
 using namespace auto_calib;
 int main() {

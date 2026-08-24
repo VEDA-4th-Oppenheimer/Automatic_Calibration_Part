@@ -35,8 +35,12 @@ int main(int argc, char **argv) {
       if (seen[row * input.columns + col]) throw std::runtime_error("duplicate measurement cell");
       seen[row * input.columns + col] = true;
       p.row = row; p.column = col;
-      p.range = m.at("distance_m").get<float>() + root.at("sensor").value("range_offset_m", 0.0f);
-      const float pan = m.at("pan_rad").get<float>(), tilt = m.at("tilt_rad").get<float>();
+      const bool has_range = m.contains("distance_m") && m["distance_m"].is_number();
+      const bool has_angles = m.contains("pan_rad") && m["pan_rad"].is_number() &&
+                              m.contains("tilt_rad") && m["tilt_rad"].is_number();
+      if (!has_range || !has_angles) continue;
+      p.range = m["distance_m"].get<float>() + root.at("sensor").value("range_offset_m", 0.0f);
+      const float pan = m["pan_rad"].get<float>(), tilt = m["tilt_rad"].get<float>();
       p.xyz = Eigen::Vector3f(p.range * std::cos(tilt) * std::sin(pan),
                               -p.range * std::sin(tilt), p.range * std::cos(tilt) * std::cos(pan));
       if (m.value("valid", false) && m.value("distance_status", 0) == 1) p.flags = kValidRange;
