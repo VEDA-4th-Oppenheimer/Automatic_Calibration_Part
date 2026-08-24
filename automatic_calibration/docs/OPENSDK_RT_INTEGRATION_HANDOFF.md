@@ -78,7 +78,18 @@ OpenSDK 파이프라인은 RT 결과의 수학적 의미와 결과 lifecycle만 
 
 따라서 현재 실행기는 의도적으로 `product_approved_rt_status="NOT_PRODUCT_APPROVED_RT"`, `activation_allowed=false`를 기록한다. OpenSDK 담당자는 프로세스 종료 코드가 0이거나 내부 gate가 PASS라는 이유만으로 활성 RT를 교체해서는 안 된다.
 
+2026-08-24에는 build17~21에서 선택 167°와 80°/87° 떨어진 두 finalist가 동일
+hold-out을 모두 `2/2 PASS`하는 것도 확인했다. 이후 학습과 같은 연속 목적함수와 공통
+coverage로 비교한 최소 margin은 `6.491%`여서 최신 상태는 `CANDIDATE_RT / PASS`다.
+그러나 `product_approved_rt_status=NOT_PRODUCT_APPROVED_RT`와
+`activation_allowed=false`이므로 OpenSDK가 자동 활성화하면 안 된다.
+
 ### 3.4 OpenSDK bring-up용 현재 기준 산출물
+
+아래 두 20260820 산출물은 schema/smoke용 역사 fixture다. 현재 후보 회귀 기준은
+`automatic_calibration/generated/jenkins_scene0_ch1_20260824_build17_21_objective_holdout_prior_locked/`
+이다. 장치는 이 `CANDIDATE_RT`를 수신·보관할 수 있지만 상위 제품 승인 없이 활성 RT로
+적용하지 않는지를 검증해야 한다.
 
 | 데이터/산출물 | pair 구성 | 현재 선택 자세 | lifecycle | OpenSDK에서의 용도 |
 |---|---|---|---|---|
@@ -343,7 +354,11 @@ OpenSDK job에는 최소 다음 camera 설정을 함께 저장한다.
 - zoom/focus 설정 또는 장치가 제공하는 고정 profile 식별값
 - flip, mirror, corridor-view/rotation
 
-해상도, zoom, focus, digital crop, rotation, LDC가 profile과 다르면 작업을 중단한다. LDC 상태가 `unknown`이면 자동으로 raw 또는 rectified라고 추측하지 말고 진단 상태로 보류한다.
+해상도, zoom, focus, digital crop, rotation 또는 distortion state가 profile과 다르면
+작업을 중단한다. 영상의 `raw`/`rectified` 상태가 `unknown`이면 추측하지 말고 진단
+상태로 보류한다. 카메라 UI의 LDC 지원 여부가 `unknown`이어도 OpenSDK adapter가 raw
+stream임을 명시적으로 보장하고 해당 raw K+D profile을 사용하면 warning을 기록한 뒤
+후보 검증을 계속할 수 있다.
 
 ### 9.3 제조사 K/D가 생겼을 때
 
@@ -406,6 +421,10 @@ OpenSDK adapter는 job마다 격리된 staging directory를 만들고 `000_image
 | vanishing/Manhattan cues | 수직·수평 방향 지원 | 후보가 장면의 주요 구조 방향과 맞는지 보조 평가 |
 
 edge-only 방식은 반복되는 벽, 바닥, 천장 구조에서 잘못된 방향도 좋은 점수를 줄 수 있다. 그래서 현재 구현은 gradient 정보, 구조선, Manhattan 방향 및 visibility/coverage를 함께 사용한다.
+
+Manhattan 소실점 중 수직축 선택은 finalist별 training seed prior로 고정하며 같은 축을
+hold-out에서도 재사용한다. OpenSDK adapter는 이 선택을 다시 계산하거나 candidate RT에
+맞춰 바꾸지 않고 Core 결과를 그대로 전달해야 한다.
 
 ### 11.3 LiDAR feature 구성
 

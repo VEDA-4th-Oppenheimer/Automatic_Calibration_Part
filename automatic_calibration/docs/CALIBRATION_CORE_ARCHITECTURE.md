@@ -1,19 +1,29 @@
 # Calibration Core 아키텍처 및 검증 가이드
 
+> 현재 MVP 제품 운용 정책은 [`PRODUCT_CALIBRATION_POLICY.md`](PRODUCT_CALIBRATION_POLICY.md)를
+> 우선한다. 이 문서의 과거 K+RT 공동 추정·제조사 FOV 초기화 설명은 연구/진단 API의
+> 동작을 설명하는 것이며 제품 승인 경로를 의미하지 않는다.
+
 ## 1. 구현 상태
 
 현재 구현은 Ubuntu native 개발 환경에서 동작하는 **Calibration Core MVP**다.
 Stanford 2D-3D-Semantics의 RGB/depth로 생성한 가상 pan-tilt LiDAR scan을 입력으로 사용하며,
 카메라와 LiDAR 사이의 6-DoF 외부 파라미터를 추정한다.
 
-- 단일 장면 API와 다중 장면 공동 최적화 API 구현
+- 단일 장면 진단 API와 다중 장면 공통 `R,t` 최적화 API 구현
+- 동일 camera profile의 Manual ChArUco `K + distortion` 고정 및 raw 영상 undistort
 - RGB gradient magnitude와 Canny edge 추출
 - organized LiDAR range discontinuity와 surface-normal 변화량 추출
 - soft-histogram Normalized Information Distance(NID)와 edge 거리의 복합 목적함수
-- 15° 간격 360° yaw multi-start 후 Ceres 기반 6-DoF refinement
+- staged 방향 탐색: coarse score map → 상위 3개 contiguous basin → 5° local search →
+  1° local search
+- 서로 분리된 최대 3개 finalist에 Ceres 기반 6-DoF `R,t` refinement
+- objective 유의차 → near-tie TESL → confidence 계층 선택과 dual-margin ambiguity gate
 - 기계 설계값(mechanical prior) 정규화
 - 입력 품질, NID 중첩·개선률, multi-start 모호성, 이동량 품질 게이트
 - 불합격 후보를 외부로 내보내지 않고 입력 prior를 반환하는 fail-safe 계약
+- `INTERNAL_GATE_PASS`, `CANDIDATE_RT`, `PRODUCT_APPROVED_RT` lifecycle 상태 분리
+- Manual RT 주변 ±1/3/5/10° perturbation을 평가하는 reference conformance 도구
 - 합성 ground truth를 이용한 conformance CLI 및 JSON 결과
 
 OpenSDK/CV5 이식과 실제 actuator 데이터 취득은 이 구현 범위에 포함하지 않는다.
@@ -46,18 +56,22 @@ flowchart LR
     B --> D["2D edge distance transform"]
     E["Organized pan-tilt scan(s)"] --> F["Range discontinuity + surface normal change"]
     F --> G["LiDAR geometry feature"]
-    H["Mechanical position prior"] --> I["360° yaw multi-start"]
+    H["Mechanical position prior"] --> I["Coarse score map"]
     C --> J["Soft-histogram NID"]
     G --> J
     D --> K["Edge reprojection residual"]
     F --> K
-    I --> L["Best coarse direction"]
+    I --> L["Top-3 contiguous basins"]
+    L --> M["5° then 1° local search"]
     J --> L
     K --> L
-    L --> M["Ceres joint K + RT refinement"]
-    M --> N{"NID / edge / ambiguity / prior gates"}
-    N -->|PASS| O["Estimated K and extrinsic"]
-    N -->|FAIL| P["Return input K and mechanical prior"]
+    M --> N["Up to 3 distinct Ceres finalists (K+D fixed)"]
+    N --> O{"Objective / TESL / confidence + support gates"}
+    O -->|INTERNAL_GATE_PASS| P{"All viable finalists on hold-out"}
+    P --> T["Pass-ratio tier + same training objective + common coverage"]
+    T -->|selected margin >= 2%| R["Candidate RT; no activation"]
+    T -->|separated margin < 2%| S["FINALIST_HOLDOUT_AMBIGUOUS"]
+    O -->|FAIL| Q["Return fixed K/D and mechanical prior; no fallback"]
 ```
 
 ### RGB feature
@@ -71,12 +85,39 @@ Gradient feature는 NID 입력이고, distance transform은 정확한 경계 위
 
 ### LiDAR geometry feature
 
-organized scan의 각 유효 cell에서 두 값을 계산한다.
+organized scan의 각 유효 cell에서 두 값을 **서로 다른 채널**로 계산한다.
 
 - 수평·수직 이웃과의 range 차이가 threshold를 넘는 정도
 - 좌우·상하 점으로 계산한 surface normal이 이웃 normal과 달라지는 각도
 
-두 값 중 큰 값을 0~1 geometry feature로 사용한다. 평면 내부의 낮은 값에 histogram이 묻히지 않도록 feature 값 구간별로 균형을 맞춰 장면당 최대 5,000점을 결정적으로 샘플링한다. 원시 `signal_strength`는 현재 유효성 필터에만 사용하며 NID 입력에는 넣지 않는다.
+range 변화량과 normal 변화량을 합쳐 하나의 값으로 만들지 않는다. 각각 영상 gradient와
+NID를 계산하고 기본값 `range/normal=0.5/0.5`로 결합한다. 영상 전체 histogram 하나만
+사용하면 서로 다른 위치의 같은 분포를 구분하지 못하므로 2×2 spatial cell별 NID를
+평균한다. 각 cell은 최소 투영점 수와 feature entropy를 통과해야 하며, 유효 cell 부족은
+`NID_SPATIAL_ENTROPY_INSUFFICIENT`로 거절한다. 장면당 최대 5,000점을 결정적으로
+샘플링한다.
+
+F2P `signal_strength`는 거리 제곱과 입사각 영향을 보정하고 range-bin median/MAD로
+정규화한 뒤 영상 밝기와 별도 spatial NMI를 계산한다. Manual RT 주변 ±1/3/5/10°
+perturbation에서 식별력이 검증된 경우에만 가중치를 켠다. 2026-08-14 실데이터에서는 이
+conformance가 실패했으므로 기본 가중치는 계속 0이다.
+
+### Edge 정합용 LiDAR 불연속 필터
+
+NID의 연속 geometry feature와 별도로, Canny distance에 대응하는 LiDAR edge는 인접
+range 차이만으로 정하지 않는다. 비스듬히 바라본 하나의 벽·책상 면은 같은 평면이어도
+셀 간 range 차이가 절대 임계값을 넘을 수 있기 때문이다. 현재 edge 선택은 다음 조건을
+모두 적용한다.
+
+1. 절대/상대 range 임계값을 넘는다.
+2. 같은 fitted plane label의 두 점은 제외한다.
+3. 두 normal이 유사하고 서로의 접평면 거리가 40 mm 이내이면 공면으로 보고 제외한다.
+4. 현재 gap이 같은 축의 앞·뒤 gap 최댓값보다 기본 2배 이상 클 때만 남긴다.
+
+마지막 비율은 `--lidar-edge-local-contrast-ratio`로 조정하며 1 미만은
+`INVALID_LIDAR_EDGE_CONFIG`로 거절한다. 실제 깊이 단절의 양쪽 점은 모두 보존한다. 이
+필터는 v10 hold-out 잔차 이미지에서 확인된 책상 상판·벽 내부의 가짜 edge를 제거하며,
+평면 교차선/반복 폐색 구조선 정책을 대체하지 않고 edge 보조항에만 적용한다.
 
 ### 3D 평면과 구조선 추출
 
@@ -98,8 +139,13 @@ organized scan의 각 유효 cell에서 두 값을 계산한다.
    반경에서 승인 평면 쌍을 찾는다. 두 평면 각도가 20° 이상이고, 중복을 제거한 관측
    경계점 중 수학적 교차선 100 mm 이내의 지지점이 8개 이상일 때 그 inlier만으로
    유한 교차선의 양 끝을 정한다.
-7. 150 mm 이상의 평면 교차선만 2D LSD 선분과 비교한다. raw range discontinuity 선은
-   `occlusion edge`로 별도 저장하며 현재 목적함수에는 넣지 않는다.
+7. 150 mm 이상의 평면 교차선에 더해, 승인 평면과 미분류 geometry가 맞닿는 PCA 경계선을
+   구조 후보로 만든다.
+8. raw range discontinuity는 단일 scan에서는 진단 후보로만 두고, 여러 관측에서 방향·거리·
+   겹침이 반복되는 선만 persistent occlusion 구조선으로 승격한다.
+9. 투영된 3D 구조선과 2D LSD 선분 사이의 방향·끝점 거리·유한 구간 겹침 비용을 계산한 뒤
+   비용순 greedy assignment로 1:1 대응한다. 같은 강한 2D 선 하나가 여러 3D 선을 중복
+   설명할 수 없다.
 
 따라서 `surface normal`, `plane label`, `plane intersection`, `occlusion silhouette`,
 `calibration input edge`를 각각 확인할 수 있다. 장애물 표면 자체가 충분히 평평하면 별도
@@ -108,48 +154,109 @@ organized scan의 각 유효 cell에서 두 값을 계산한다.
 
 ### NID와 edge 복합 목적함수
 
-투영된 LiDAR geometry feature와 해당 영상 위치의 gradient feature로 16×16 soft joint histogram을 만든다. 한 샘플을 인접 bin에 선형 분배하므로 자세나 focal length가 조금 바뀔 때 비용도 급격히 끊기지 않는다.
+투영된 LiDAR geometry feature와 해당 영상 위치의 gradient feature로 spatial cell마다
+16×16 soft joint histogram을 만든다. 한 샘플을 인접 bin에 선형 분배하므로 자세나 focal
+length가 조금 바뀔 때 비용도 급격히 끊기지 않는다.
 
 ```text
-NID = 1 - MI(L, C) / H(L, C)
-J   = 0.70 * NID² + 0.30 * normalized_edge_distance²
+NID_channel = mean_cell(1 - MI(L, C) / H(L, C))
+NID_geometry = w_range * NID_range + w_normal * NID_normal
+J = w_nid*NID_geometry² + w_edge*edge² + w_line*line²
+    + w_manhattan*direction² + w_signal*signal_NMI²
 ```
 
 - `MI(L,C)`: LiDAR geometry와 camera gradient의 mutual information
 - `H(L,C)`: 두 특징의 joint entropy
 - NID는 작을수록 두 특징의 통계적 정합이 좋다.
 - Edge는 위치 정밀도를 보완하지만 단독 PASS 근거로 쓰지 않는다.
+- Manhattan 방향 항은 영상 LSD 소실점 후보와 LiDAR `+Y` 중력축·수평 벽축을 맞춘다.
+  후보는 최대 12개를 유지해 지지선 수가 가장 큰 세 방향만 남길 때 실제 수직군이
+  탈락하던 문제를 피한다.
+- 영상 소실점 중 어느 축을 수직으로 볼지는 각 finalist의 training `seed.prior`로 한 번
+  선택하고 training/hold-out에 동일하게 재사용한다. Refined candidate RT로 hold-out의
+  수직축을 다시 선택하지 않는다. Candidate RT는 선택된 동일 특징의 투영·Manhattan
+  잔차 계산에만 사용한다.
 
-다중 장면은 동일한 `R,t,fx,fy,cx,cy`를 공유한다. Ceres numeric differentiation으로 NID와 edge 잔차를 함께 줄이고 mechanical prior는 과도한 평행이동과 비현실적 해를 억제한다.
+다중 장면은 동일한 `R,t`와 고정된 camera profile의 `K,D`를 사용한다. Ceres numeric
+differentiation으로 NID와 edge 잔차를 줄이고 mechanical prior는 과도한 평행이동과
+비현실적 해를 억제한다. `K,D`를 함께 최적화하는 코드는 연구·진단 flag로 남아 있지만
+MVP 제품 경로에서는 비활성화한다.
 
-### 360° yaw multi-start
+### staged 방향 탐색과 contiguous basin
 
-초기 heading을 작업자가 정확히 입력하지 않아도 되도록 LiDAR 수직축 기준 -180°부터 165°까지 15° 간격의 24개 후보를 먼저 평가한다. 가장 낮은 복합 목적함수 후보에서 refinement를 시작한다. 멀리 떨어진 두 방향의 점수가 2% 이내이면 방향을 구분할 증거가 부족한 것으로 보고 `MULTISTART_AMBIGUOUS`로 거절한다.
+제품 실행기의 기본 `--search-strategy staged`는 모든 coarse 후보에 Ceres를 실행하지 않는다.
+먼저 고정 K+D에서 yaw/down/optical-roll 후보의 score map을 만들고, 각 후보의 raw score와
+인접 8개 후보의 거리 가중 평균을 `corrected_score`로 계산한다. 이 보정은 공간적으로
+연속된 고득점 영역을 선호하게 하는 선택용 보정이다.
+
+1. coarse map에서 구조 방향·overlap gate를 통과한 contiguous basin을 만든다.
+2. 서로 분리된 basin score가 가장 좋은 상위 3개 seed를 유지한다.
+3. 각 seed 주변 반경 10°를 5° 간격으로 다시 점수화한다.
+4. 5° 결과 주변 반경 5°를 1° 간격으로 점수화한다.
+5. 서로 분리된 최대 3개 1° winner에 Ceres `R,t` refinement를 실행한다.
+6. scene/core/pose/absolute support를 우선하고 objective 2% 유의차, near-tie TESL 10%,
+   confidence 순서로 최종 후보를 결정한다.
+7. objective와 confidence margin이 모두 2% 미만이거나 선택 support가 경쟁 후보의 60%
+   미만이면 `FINALIST_AMBIGUOUS`로 실패한다.
+
+5°/1° 단계의 NID relative hard gate는 같은 local yaw window의 지지만 비교한다.
+서로 다른 360° FOV의 global NID 최대값은 final objective/confidence의 soft 진단값으로만
+사용한다. 절대 NID/visible edge와 공간 분포 gate는 유지한다.
+
+basin이 없거나 1° winner가 없거나 모든 final Ceres가 실패하면 임의 후보를 활성화하지
+않는다. 원래 score map과 후보 산출물은 진단용으로 남기되 lifecycle 상태는 `FAIL` 또는
+`INTERNAL_GATE_FAIL`이다. `--search-strategy legacy`는 비교 실험용으로 보존하며 제품
+기본 경로가 아니다.
 
 ### Optical-axis down × yaw 2차원 초기 탐색
 
-실데이터 실행기는 채널 공통 `roll=90°`를 사용하지 않는다. 별도 장착 각도 입력이 없으면 down 0~90°를 15° 간격으로 만들고, 각 down 후보마다 위 24개 yaw 후보를 평가한다. 점수 상위 5개는 투영 이미지와 후보 RT로 저장한다. 단일 관측에서는 제조사 FOV 기반 K를 고정하고 이 탐색을 수행하되, 결과를 활성화하지 않고 `SINGLE_OBSERVATION_DIAGNOSTIC_ONLY`로 강제 실패시킨다. 3개 이상 관측에서만 K와 RT 공동 최적화 및 PASS 판정을 허용한다.
+실데이터 실행기는 채널 공통 `roll=90°`를 사용하지 않는다. 별도 장착 각도 입력이 없으면 down 후보를 만들고 각 down 후보마다 전체 yaw 후보를 평가한다. 수평·수직 구조 방향군이 설정 개수보다 적은 coarse 후보는 인접 basin에서 제외하며, 광축 하향각이 물리 한계를 넘는 refined 후보는 활성화하지 않는다. 인접 8개 후보 보정은 raw/neighbor `0.8/0.2`로 basin을 제안한다. 단, basin 결과가 최종 gate를 통과하지 못해도 다른 후보를 fallback으로 승격하지 않는다.
+
+단일 관측도 입력 K를 고정하고 탐색하며 내부 gate를 통과하면
+`INTERNAL_GATE_PASS`가 될 수 있지만 `CANDIDATE_RT`나 제품 활성값으로 승격하지 않는다.
+Manual intrinsic이 전달되면 같은 해상도·zoom/focus profile의 K와 왜곡 보정을 사용한다.
+3개 이상 관측이어도 동일 고정 장면의 반복은 독립적인 구조 관측으로 간주하지 않으며,
+실제 승인에는 hold-out 재투영과 독립 물리 기준 검증이 추가로 필요하다.
+
+staged 다중 장면 경로는 선택 RT만 hold-out에 적용하지 않는다. training/core/absolute
+support를 통과한 최대 3개 finalist를 모두 같은 hold-out에 고정 적용한다. 선택 yaw와
+15°보다 떨어진 후보를 pass-ratio tier로 먼저 나누고, 같은 tier에서는 학습과 같은
+Edge/NID/구조선/Manhattan 목적함수를 비교한다. Coverage는 모든 finalist의 공통 최대
+support로 정규화한다. 선택 후보 우위가 기존 2% objective margin 미만이면
+`FINALIST_HOLDOUT_AMBIGUOUS`로 `CANDIDATE_RT` 승격을 차단한다. 실패한 diagnostic RT와
+안전 prior는 별도 필드로 유지한다.
 
 투영 시 카메라 깊이 기준 z-buffer를 만들고 최근접 표면에서 10 mm보다 뒤에 있는 점은 2D/색상 PLY 출력에서 제외한다. `mechanism.tilt_zero`는 기구축 홈 메타데이터로만 기록하며 좌표 계산에는 `measurements[].tilt_rad`와 JSON `frame` 계약을 사용한다. 지원하지 않는 handedness/convention은 입력 단계에서 거절한다.
 
-현재 z-buffer는 산출물 시각화에만 적용되어 목적함수와 가시점 집합이 다르다. 다음 변경은
-coarse 후보별로 동일한 z-buffer를 적용해 보이는 구조점만 점수화한다. Ceres refinement는
-현재 RT에서 가시 집합을 고정한 내부 최적화와 z-buffer를 갱신하는 외부 반복으로
-구성한다. 매 잔차 평가마다 z-buffer를 바꾸지 않아 목적함수의 불연속을 피한다.
+z-buffer는 산출물뿐 아니라 coarse 후보와 fixed-pose 검증에도 적용한다. 최근접 표면에서
+10 mm보다 뒤에 있는 edge/NID/구조선 샘플은 점수에서 제외한다. Ceres refinement에서는
+현재 자세에서 만든 가시 집합을 고정해 잔차 평가 중 z-buffer가 불연속적으로 바뀌지 않게
+한다.
 
-구조선 보조항은 OpenCV LSD의 긴 2D 선분과 organized cloud의 주요 평면 교차선을
-대응한다. 잔차는 투영선의 수직거리, 방향차, 겹치는 길이로 구성하며, 구조선 증거가
-부족하면 해당 항을 비활성화하고 진단 사유를 남긴다. JSON schema 메타데이터 보강은
-향후 권장사항이며 이 목적함수 변경의 선행조건이 아니다.
+구조선 보조항은 OpenCV LSD의 긴 2D 선분과 평면 교차선·평면 경계선·반복 폐색선을
+1:1 대응한다. 잔차는 투영선의 수직거리, 방향차, 겹치는 길이로 구성하며 수평·수직
+방향군의 대응 개수를 따로 기록한다. 영상 소실점과 LiDAR 중력/벽축 방향 잔차는 구조선
+위치 잔차와 분리한다. JSON schema 메타데이터 보강은 향후 권장사항이며 이 목적함수
+변경의 선행조건이 아니다.
 
 
 ### Pan/Tilt sweep과 방향 후보의 구분
 
 실제 LiDAR 변환식 `x=d cos(tilt) sin(pan)`, `y=-d sin(tilt)`, `z=d cos(tilt) cos(pan)`에서 pan 회전축은 `+Y`이다. 따라서 Core의 yaw multi-start(`UnitY`)는 pan 축과 기하학적으로 같은 축을 탐색한다. 그러나 pan 360° sweep은 측정 데이터의 방위각 범위이고 yaw multi-start는 카메라와 LiDAR 사이 외부 회전 후보이므로 동일한 동작이 아니다. 평면·대칭 장면에서는 360° 데이터를 가져도 yaw가 관측되지 않을 수 있다.
 
-실행기의 down 후보는 카메라 optical axis 초기 회전 후보이며 JSON의 tilt 샘플을 그대로 복사한 값이 아니다. 현재 기본값은 0~90°를 15° 간격으로 탐색한다. 따라서 producer가 `tilt_zero`와 실제 `tilt=0/-90°` 광선 방향을 확정하기 전에는 후보 방향을 정답 RT로 해석하지 않는다. `tilt_zero`가 `forward`와 다르면 입력을 거절하고, 명시적 override는 진단 결과에만 허용한다.
+실행기의 down 후보는 카메라 optical axis 초기 회전 후보이며 JSON의 tilt 샘플을 그대로 복사한 값이 아니다. coarse 단계의 기본 down/yaw 간격은 15°이며 CLI로 바꿀 수 있다. 그 뒤 staged 경로가 basin 주변을 5°와 1°로 세분화한다. 따라서 producer가 `tilt_zero`와 실제 `tilt=0/-90°` 광선 방향을 확정하기 전에는 후보 방향을 정답 RT로 해석하지 않는다. `tilt_zero`가 `forward`와 다르면 입력을 거절하고, 명시적 override는 진단 결과에만 허용한다.
 
 ## 4. 공개 API
+
+다른 Manual 세션에서 얻은 `T_camera_lidar`는 같은 좌표계와 camera profile을 확인한 뒤
+`mechanical_prior`의 초기 seed로 사용할 수 있다. Manual 값의 품질 등급, 세션 간 전달
+조건, `T_camera_marker_board`만 있는 경우의 제한, intrinsic 전달과 hold-out 분리는
+[MANUAL_REFERENCE_PRIOR_WORKFLOW.md](MANUAL_REFERENCE_PRIOR_WORKFLOW.md)를 따른다.
+
+Manual prior 하나만으로 최종값을 고정하지 않는다. mechanical/global seed와 함께
+multi-start를 유지하고, 결과는 NID·edge·projected ratio·ambiguity·prior update gate를
+통과해야 한다. Manual ChArUco `K+D` profile은 제품 projection에서 고정 입력으로
+사용하며 optimizer가 다시 변경하지 않는다.
 
 탐색 간격과 인접 후보 보정의 선정 절차는
 [Yaw–Roll 탐색 간격 시험 계획](ORIENTATION_SEARCH_STEP_SIZE_TEST_PLAN.md)을 따른다.
@@ -171,9 +278,9 @@ auto result = auto_calib::calibrateExtrinsicMultiScene(
     observations, mechanical_prior, config);
 ```
 
-모든 장면에서 동일한 외부 파라미터 하나를 공동 최적화한다.
-`optimize_camera_intrinsics=true`이면 장면들이 공유하는 `fx,fy,cx,cy`도
-제한된 범위에서 함께 최적화한다. 실제 시스템에서는 센서가 강체로 고정되고
+모든 장면에서 동일한 외부 파라미터 하나를 공동 최적화한다. `K,D`는 입력한 Manual
+profile을 고정한다. `optimize_camera_intrinsics=true`는 API 호환성을 위한 연구·진단
+옵션이며 MVP 제품 실행에서는 허용하지 않는다. 실제 시스템에서는 센서가 강체로 고정되고
 zoom/focus/LDC가 유지된 상태에서 서로 다른 벽, 문틀, 가구 경계를 포함한 장면
 5개 이상을 사용한다.
 
@@ -182,10 +289,13 @@ zoom/focus/LDC가 유지된 상태에서 서로 다른 벽, 문틀, 가구 경�
 | 필드 | 의미 |
 |---|---|
 | `success` | Core 품질 게이트 통과 여부 |
+| `candidate_available` | Ceres 전후 진단 후보가 계산되었는지 여부 |
+| `internal_gate_pass` | 현재 입력의 overlap/구조/목적함수 gate 통과 여부; 활성화 아님 |
+| `state` | `SCORE_MAP_ONLY`, `INTERNAL_GATE_PASS`, `INTERNAL_GATE_FAIL` 등 Core 상태 |
 | `reason_code` | `PASS` 또는 거절 원인 |
 | `estimated_t_camera_lidar` | 통과 시 후보, 실패 시 입력 mechanical prior |
-| `estimated_camera` | 통과 시 공동 추정 K, 실패 시 입력 K |
-| `candidate_camera` | 품질 게이트 전 진단용 K 후보 |
+| `estimated_camera` | 통과 시 사용한 고정 K/D profile, 실패 시 입력 profile |
+| `candidate_camera` | 연구/진단 모드에서만 생성되는 K 후보; 제품 활성값 아님 |
 | `metrics.projected_ratio` | 전체 LiDAR edge 중 영상에 유효 투영된 비율 |
 | `metrics.lidar_geometry_points` | NID에 사용한 range/normal 특징 점 수 |
 | `metrics.lidar_planes` | 승인된 3D 평면 수 |
@@ -200,14 +310,24 @@ zoom/focus/LDC가 유지된 상태에서 서로 다른 벽, 문틀, 가구 경�
 | `metrics.objective_improvement_ratio` | 복합 목적함수의 `(initial-final)/initial`; 양수일수록 개선 |
 | `solver_summary` | Ceres 종료 요약 |
 
+### Reference RT perturbation 도구
+
+`run_real_calibration`에 `--manual-reference-json`과
+`--reference-rt-perturbation-only true`를 주면 입력 전체 관측에 대해 reference RT와
+LiDAR 좌표축별 ±1/3/5/10° perturbation을 평가한다. 결과는
+`reference_rt_perturbation.csv`와 `reference_rt_perturbation_result.json`에 기록한다.
+이 시험은 signal-strength NMI가 자세 오차를 식별하는지 확인하는 진단 증거이며, PASS여도
+RT 활성화나 `signal_nmi_weight` 자동 활성화를 의미하지 않는다.
+
 ## 5. Fail-safe 및 품질 게이트
 
 아래 조건 중 하나라도 만족하지 못하면 `success=false`다.
 
 - 유효한 camera intrinsic
-- intrinsic 공동 추정 시 최소 3관측 및 동일 해상도
+- camera profile의 K/D, 해상도, zoom/focus/LDC provenance 일치
 - focal/principal point 탐색 경계 내부 해
 - 유효한 NID histogram·가중치·normal threshold 설정
+- 유효한 LiDAR edge 절대/상대 임계값과 local contrast ratio
 - 최소 camera edge 수
 - 장면별 최소 LiDAR edge 수
 - 장면별 최소 LiDAR geometry feature 수와 최종 NID 투영 수
@@ -248,11 +368,19 @@ ctest --test-dir build --output-on-failure
 - 단일 장면 최적화
 - 다중 장면 공동 최적화
 - geometry NID 특징 생성·투영과 유한한 NID 결과
-- 180° 잘못된 초기 heading의 360° yaw multi-start 복구
+- range/normal 분리 spatial NID와 entropy/active-cell gate
+- 평면 경계선 및 여러 관측에서 반복되는 폐색선 추출
+- 2D–3D 구조선 1:1 대응과 수평/수직 대응 개수
+- 영상 소실점–LiDAR 중력축 Manhattan 잔차와 후보 진단
+- training/hold-out에서 동일한 finalist seed prior를 사용하는 Manhattan 축 선택 회귀
+- 보정된 `signal_strength` NMI 및 Manual RT perturbation 진단
+- 학습/hold-out 장면별 fixed-pose 품질 gate
+- separated viable finalist별 hold-out 동률 fail-closed
+- coarse score map에서 180° 잘못된 초기 heading을 포함한 basin 탐색
 - blank RGB 입력 거절
-- 과도한 후보 이동 거절 및 prior fallback
+- 과도한 후보 이동 거절 및 fallback 없는 fail-safe
 - 최소 objective 개선률 미달 거절
-- 공동 intrinsic 최소 관측 수 및 유효 추정
+- 고정 K/D profile 일치 및 왜곡 보정 경로
 - pose error 계산
 
 ## 7. Stanford 다중 장면 conformance 실행
@@ -303,9 +431,9 @@ adapter로 교체하고 Core API는 유지한다.
 1. pan/tilt encoder 각도와 1D LiDAR range를 `Scan`의 row/column 순서로 변환
 2. 카메라 timestamp와 scan sweep 기준 timestamp 동기화
 3. invalid range, saturation, actuator 정지/가속 구간을 quality flag로 제거
-4. 고정된 resolution/zoom/focus/LDC 상태의 원본 영상과 제조사 FOV 기반 초기 K를 Core에 전달
-   하고, 수동 intrinsic 파일 없이 다중 장면에서 K와 RT를 공동 추정
-5. 최소 5개의 서로 다른 장면을 모아 `calibrateExtrinsicMultiScene` 호출
+4. 고정된 resolution/zoom/focus/LDC 상태의 원본 영상과 동일 profile의 Manual ChArUco
+   `K + distortion`을 Core에 전달하고, raw 영상은 같은 profile로 undistort
+5. 최소 3개의 구조 관측과 독립 hold-out을 모아 `calibrateExtrinsicMultiScene` 호출
 6. `success=true`와 현장 정확도 검증을 모두 통과한 경우에만 보정값 저장
 
 ## 9. 현재 한계와 완료 조건
@@ -329,5 +457,7 @@ adapter로 교체하고 Core API는 유지한다.
 | `src/calibration_core.cpp` | feature 추출, Ceres 최적화, 품질 게이트 |
 | `apps/run_synthetic_calibration.cpp` | 단일 Stanford 합성 conformance CLI |
 | `apps/run_multi_synthetic_calibration.cpp` | 다중 Stanford 합성 conformance CLI |
+| `apps/run_real_calibration.cpp` | staged 탐색, finalist별 hold-out 점수·수명주기 JSON |
 | `tests/calibration_core_tests.cpp` | Core 단위 및 fail-safe 회귀 테스트 |
+| `tests/verify_real_calibration_result.cmake` | 성공·예상 거절 실데이터의 exit code, 상태, reason, candidate/product 수명주기, 활성 금지와 Manhattan prior 정책을 공통 검증 |
 | `generated/.../calibration_result.json` | 실행별 machine-readable 결과 |

@@ -2,9 +2,13 @@
 
 - 문서 상태: 실데이터 검증 중간 결론
 - 작성일: 2026-08-07
-- 최종 수정일: 2026-08-13
-- 적용 범위: Calibration Core, Stanford 합성 검증, real session-001~003 및 고정환경 130333
-- 최종 판정: **합성 다중 장면 검증 PASS, 실데이터 calibration 전부 FAIL**
+- 최종 수정일: 2026-08-18
+- 적용 범위: Calibration Core, Stanford 합성 검증, real session-001~003 및 고정환경 130333/20260818 CH1
+- 최종 판정: **합성 검증 PASS, CH1 v11 내부 gate PASS, 제품 RT/conformance 승인 보류**
+
+> 2026-08-20 이후의 제품 운용 기준은 [`PRODUCT_CALIBRATION_POLICY.md`](PRODUCT_CALIBRATION_POLICY.md)다.
+> 이 리포트의 제조사 FOV K·K+RT 공동 추정 관련 문장은 과거 실험 이력으로 보존하며,
+> 현재 MVP는 Manual ChArUco `K+D` 고정과 `R,t` 전용 추정을 사용한다.
 
 ## 1. 목적
 
@@ -135,7 +139,7 @@ JSON에는 scan pan 범위 0~359.1°와 mechanism pan 범위 0~179°가 함께 �
 다음 조건으로 다시 계산했다.
 
 - camera downward prior: `roll=+90°`
-- camera center Y: `+0.08305m`(당시 잘못 적용; 현재 기준은 `-0.08305m`)
+- camera center Y: `+0.08305m`(당시 잘못 적용; 현재 기준은 `-0.08105m`)
 - 채널별 X 부호와 heading 탐색
 - 표시용 point cloud: `viewer_z_up=(lidar_x,lidar_z,-lidar_y)`
 
@@ -181,24 +185,19 @@ false alignment다. Core와 실제 실행기에 최소 objective 개선률 5% �
 이를 찾기 위한 360° yaw multi-start는 2026-08-11 추가했다. yaw로 설명되지 않는 렌즈별
 optical tilt까지 자동 탐색하는 단계는 아직 남아 있다.
 
-### 3.8 Manual intrinsic 의존 제거
+### 3.8 Manual K+D profile 고정 (현재 제품 경로)
 
-기존 130333 CH3 replay는
-`manual_calibration/output/session-002/intrinsic/camera_intrinsic.json`의 ChArUco
-측정값을 사용했다. 설치 장소 변경 자체는 K를 바꾸지 않지만 해당 파일에는 camera
-channel, zoom, focus 및 LDC 상태가 없으므로 현재 CH3 lens 상태와 동일하다고 보장할
-수 없다. 제품 Automatic Calibration의 필수 입력으로 manual 측정값을 사용하는 것도
-목표와 맞지 않아 이 결과들은 모두 진단 결과로만 유지한다.
+기존 130333/CH3 replay에서 제조사 FOV K를 사용한 결과는 과거 진단 기록으로 유지한다.
+현재 제품 경로는 동일 channel/resolution/zoom/focus의
+`manual_calibration/output/<session>/intrinsic/camera_intrinsic.json`에서 ChArUco로
+측정한 `K + distortion`을 읽고 고정한다. raw image이면 같은 profile로 undistort한 뒤
+`R,t` 외부 파라미터만 탐색한다.
 
-실제 데이터 실행기에서 `--intrinsic` 입력을 제거하고 PNM-C16083RVQ 제조사 FOV
-범위(H 53°~100°, V 30°~54°)로 K를 초기화하도록 변경했다. 2592×1520 입력의
-현재 초기값은 `fx=1843.42`, `fy=2163.97`, `cx=1296`, `cy=760`이다.
-구조가 다른 관측 3개 이상에서 공유 `fx,fy,cx,cy,R,t`를 제한 범위로 공동
-최적화하며, 관측 부족 또는 intrinsic 경계 도달 시 결과를 활성화하지 않는다.
-
-현재 CH3 한 쌍을 manual intrinsic 없이 replay한 결과는
-`FAIL / INTRINSIC_OBSERVATIONS_INSUFFICIENT`다. 이는 데이터 부족을 명시적으로
-거절한 정상 fail-safe이며 최종 RT는 생성하지 않았다.
+설치 장소가 바뀌어도 광학 profile이 같으면 K/D는 재사용할 수 있지만, zoom/focus/LDC/
+해상도/채널이 바뀌면 새 profile이 필요하다. 제품 승인 실행에서
+`--allow-intrinsic-refinement true`는 사용하지 않는다. profile이 없거나 상태가
+불명확하면 pose 후보를 진단할 수는 있지만 결과는 `DIAGNOSTIC_ONLY`이며 활성 RT로
+승격하지 않는다.
 
 ### 3.9 2026-08-11 변경사항 재검토 및 현재 이슈 (2026-08-12 기록)
 
@@ -283,8 +282,8 @@ false PASS가 이 회귀 조건의 근거다.
 | 계획서 초기 성공 기준 | 현재 상태 | 판정 |
 |---|---|---|
 | 자연 장면 edge 재투영 RMSE 3 px 이하 | 현재 구현 mean edge distance 35.34~238.95 px(정의가 달라 직접 RMSE 비교 불가) | 검증 지표 미충족 |
-| 회전 반복 표준편차 0.2° 이하 | 강체 고정 반복 데이터 없음 | 미평가 |
-| 이동 반복 표준편차 10 mm 이하 | 강체 고정 반복 데이터 없음 | 미평가 |
+| 회전 반복 표준편차 0.2° 이하 | 20260818 동일 epoch에서 3개 추정용 입력과 1개 고정 RT hold-out은 확보했지만 RT 분산은 아직 산출하지 않음 | 부분 검증 / 분산 미평가 |
+| 이동 반복 표준편차 10 mm 이하 | 20260818 동일 epoch에서 3개 추정용 입력과 1개 고정 RT hold-out은 확보했지만 RT 분산은 아직 산출하지 않음 | 부분 검증 / 분산 미평가 |
 | ±2°/±50 mm 초기 오차 복원 90% 이상 | 합성 일부 검증, 실데이터 미검증 | 미충족 |
 | 잘못된 결과 활성화 0건 | false PASS 발견, 최소 objective 개선률 5% 게이트 및 회귀 테스트 추가 | 부분 충족 / 독립 검증 필요 |
 | 동일 입력 offline replay 재현 | 동일 입력 solver 재현 가능, 센서 반복성 미충족 | 부분 충족 |
@@ -307,8 +306,8 @@ false PASS가 이 회귀 조건의 근거다.
 - 카메라와 LiDAR를 하나의 plate/frame에 강체 고정
 - LiDAR frame 기준 camera center `(x,y,z)`와 장착 roll/pitch/yaw 측정
 - 두 센서의 +X/+Y/+Z 방향을 사진과 CAD로 기록
-- 제조사 FOV 기반 초기 K와 고정된 resolution/zoom/focus/LDC 상태 사용
-- target-based intrinsic은 제품 Automatic 입력이 아니라 개발 reference가 필요할 때만 별도 사용
+- 동일 channel/resolution/zoom/focus/LDC profile의 Manual ChArUco K+D 고정
+- target-based/ChArUco 촬영은 profile 생성·독립 reference가 필요할 때만 별도 사용
 - 센서 묶음 전체 이동은 허용하되 센서 사이 상대 pose 변경 금지
 - 평평한 천장 대신 방 모서리, 높이가 다른 상자와 비대칭 다중 평면 사용
 - 같은 설치에서 200 bps 5회, 400 bps 5회 반복
@@ -380,6 +379,38 @@ CH2 `(12°,-43°)`, CH3 `(2°,-36°)`, CH4 `(3°,-43°)`였다. 모든 채널의
 
 결과: `automatic_calibration/generated/real_session_const_20260811_full_search_1deg/`
 
+### 6.8 20260818 CH1 고정환경 회차 확인 (2026-08-18)
+
+운영자가 `data/real_calibration/session-const-env/repeat_test_sample/20260818/`의
+수집 조건을 재확인했다. 네 image와 네 LiDAR JSON은 카메라, LiDAR, pan-tilt actuator,
+보드 및 장면을 수집 중 이동시키지 않은 동일 installation epoch
+(`session-const-env-20260818-ch1-fixed`)에 속한다. 따라서 파일명 시각이 다르다는 이유로
+서로 다른 외부 파라미터를 적용하는 데이터로 분류하지 않는다.
+
+이번 회차 입력은 다음과 같다.
+
+| scene | CH1 image | LiDAR JSON | 역할 |
+|---:|---|---|---|
+| 0 | `20260818-143751-CH1.jpg` | `calib-20260818-143748_sweep-000001_pan_tilt_lidar.json` | RT 추정 |
+| 1 | `20260818-145847-CH1.jpg` | `calib-20260818-145912_sweep-000001_pan_tilt_lidar.json` | RT 추정 |
+| 2 | `20260818-151305-CH1.jpg` | `calib-20260818-151312_sweep-000001_pan_tilt_lidar.json` | RT 추정 |
+| 3 | `20260818-155208-CH1.jpg` | `calib-20260818-154229_sweep-000001_pan_tilt_lidar.json` | 고정 RT hold-out |
+
+여기서 image–scan **pairing**은 센서가 동시 촬영됐다는 뜻이 아니라 offline replay를
+위한 결정론적 입력 연결이다. JSON은 연속 sweep이고 wall-clock 촬영시각을 제공하지
+않으므로 시간 동기화 conformance로 해석하지 않는다. 정적 장면과 동일한 센서 상대
+자세의 반복성을 확인하는 회차로만 사용한다.
+
+동일 epoch의 scene 0~2로 추정한 RT를 scene 3에 재최적화 없이 적용한 결과는
+`fixed-environment hold-out PASS`다. 다만 이는 한 설치 epoch에서의 재투영 재현성
+확인이지, 서로 다른 장소·설치 epoch에 대한 일반화나 Manual RT와의 절대 정확도 인증이
+아니다. 따라서 운영 RT 교체는 보류하고, actuator·zoom·focus·LDC·영상 방향을 변경한
+뒤에는 새 `installation_epoch`로 분리한다.
+
+세부 파일 목록, 고정 조건, pairing 규칙 및 산출물은
+[`CH1_FIXED_ENVIRONMENT_DATA_RECORD_20260818.md`](CH1_FIXED_ENVIRONMENT_DATA_RECORD_20260818.md)를
+기준 문서로 사용한다.
+
 ## 7. 다음 테스트 절차
 
 ### Phase A — Point cloud 단독 검증
@@ -394,7 +425,7 @@ Point cloud가 센서 사양과 프로젝트 noise gate를 만족하지 않으�
 
 ### Phase B — 투영 경로 검증
 
-1. 제조사 FOV 초기 K와 고정된 LDC 상태의 pixel 좌표 일관성 검증
+1. 동일 channel/resolution/zoom/focus의 Manual ChArUco K+D profile과 고정된 LDC 상태의 pixel 좌표 일관성 검증
 2. 필요 시 알려진 3D target point를 개발 reference RT로만 투영
 3. 이미지 회전 전후 camera model과 pixel 좌표 일관성 확인
 4. `T_camera_lidar` 방향과 inverse 사용 여부 확인
@@ -451,7 +482,9 @@ Point cloud가 센서 사양과 프로젝트 noise gate를 만족하지 않으�
 | 0.15 | 2026-08-13 | 미분류 평면 재할당, 공면 병합, IMU-Y 수평면 높이 복구와 130333 CH1 재시험 결과 기록 |
 | 0.16 | 2026-08-13 | FAIL 3D 산출물이 탈락 후보 RT를 사용하던 오류 수정, 설치 중심·광축·영상 아래 벡터 기반 재투영 및 OBJ 카메라 광축 마커 추가 |
 | 0.17 | 2026-08-13 | VS Code Viewer mesh의 mm 좌표를 m로 변경하고 PLY/OBJ 단위 계약을 명시 |
+| 0.18 | 2026-08-20 | 제품 운용 정책 정정: Manual ChArUco K+D 고정, K+RT 공동 추정 보류, 내부 PASS와 제품 승인 상태 분리 |
 | 0.18 | 2026-08-13 | 지금까지의 좌표계·데이터·목적함수·탐색·구조선·투영·K profile 시도를 시간순으로 통합하고, 유효 결론·폐기 가정·남은 게이트를 명시 |
+| 0.19 | 2026-08-14 | range/normal spatial NID, 평면 경계·반복 폐색 구조선, 1:1 대응, Manhattan 수직축, signal NMI 진단, 장면별/hold-out gate 및 v6~v9 결과 추가 |
 
 ## 10. 현재까지 시도한 내용 요약
 
@@ -812,10 +845,9 @@ Top X-Y 개선은 search step 하나의 효과가 아니라 다음 오류를 순
    3D 양 끝점을 만든다.
 4. **2D-3D 선분 대응:** 투영선과 LSD 선의 수직거리뿐 아니라 방향 차이, 양 끝점 거리,
    겹침 길이를 함께 최소화한다.
-5. **카메라 profile 확인:** 실제 CH1 stream resolution/FOV/LDC 상태를 고정하고, 수동
-   checkerboard 값을 가져오지 않는 범위에서 manufacturer profile 후보 K를 RT와 함께
-   제한적으로 탐색한다.
-6. 위 조건에서 구조가 다른 동기 관측 3쌍 이상을 공동 최적화한다.
+5. **카메라 profile 확인:** 실제 CH1 stream resolution/zoom/focus/LDC 상태와 동일한
+   Manual ChArUco K+D를 고정한다. manufacturer profile 후보는 민감도 진단으로만 남긴다.
+6. 위 조건에서 구조가 다른 동기 관측으로 R,t를 추정하고, 사용하지 않은 hold-out으로 검증한다.
 
 판정 기준은 Top X-Y 방향 일치만이 아니라 Front X-Z에서 책상/캐비닛의 동일 edge가
 겹치고, hold-out 장면에서도 같은 RT가 유지되는 것이다.
@@ -890,9 +922,9 @@ principal point 불확실성이 front 투영 오차에 영향을 준다는 증�
 - 점수 분해: 각 결과의 `orientation_full_search.csv`
 - 3D 구조선: `debug/scene_0/04b_lidar_structural_segments.{ply,obj}`
 
-현 데이터에는 CH1 image–scan 동기 관측이 1쌍뿐이라 마지막 공동 K+RT 최적화 단계는
-실행할 수 없다. 동일 설치/채널에서 책상 edge가 서로 다른 영상 위치와 깊이에 나타나는
-동기 image+JSON을 최소 3쌍 수집한 후 공동 최적화와 hold-out 투영을 수행한다. 다음
+현 historical 데이터에는 CH1 image–scan 동기 관측이 1쌍뿐이라 외부 RT 검증이 불가능했다.
+현재는 Manual K+D를 고정하고 동일 설치/채널에서 책상 edge가 서로 다른 영상 위치와 깊이에
+나타나는 image+JSON을 수집해 R,t를 추정한 후 hold-out 투영을 수행한다. 다음
 수집에서는 카메라 FOV 안에 벽–책상 상판 경계가 충분히 길게 들어오고 LiDAR에서도 그
 경계가 연속 range discontinuity로 보이는 구도를 우선한다.
 
@@ -1110,3 +1142,176 @@ NID가 개선되지 않았으므로 현재 `14°/17°/-169°`는 정답 RT가 �
 - 실제 channel FOV/zoom/focus 및 LDC 상태 확인
 - 벽–책상/벽–바닥 경계가 2D와 LiDAR 양쪽에서 충분한 길이로 보이는 데이터
 - reference RT 또는 독립 측정값을 확보한 후 1° full-search·coarse step benchmark 수행
+
+### 10.14.11 실측 센서 수직 순서 반영 CH1 재실행 (2026-08-14)
+
+설치 측정에서 지면 기준 센서 순서가 **LiDAR → 카메라**임을 확정했다. 천장 기준
+LiDAR 635 mm, 카메라 551.95 mm이므로 카메라는 LiDAR보다 83.05 mm 위에 있다.
+JSON frame의 `+Y=down` 계약을 적용하면 카메라 중심은 다음과 같이 표현된다.
+
+```text
+C_L = (+0.05928, -0.08305, 0) m
+```
+
+이 값을 `--camera-center-x/y/z-m`으로 넣고 CH1 조명 켜짐 repeat sample을 5° yaw/down
+coarse로 재실행했다. 기본 `baseline=0.28 m`는 사용하지 않았고, LDC는 `unknown`,
+legacy range offset은 `0.084 m`로 기록했다.
+
+| 항목 | 결과 |
+|---|---|
+| 출력 | `generated/repeat_test_sample_20260814/bright_center_constrained/` |
+| camera center | `(0.05928, -0.08305, 0) m` |
+| 후보 수 | yaw/down 1,368개 (5° grid) |
+| contiguous 선택 | `down=80°`, yaw `165°` (grid 좌표) |
+| 최종 상태 | `FAIL / MULTISTART_AMBIGUOUS` |
+| 시각화 pose | `REJECTED CANDIDATE` (활성 RT 아님) |
+
+따라서 수직 offset의 부호/위치 입력은 올바르게 반영되었지만, 단일 고정 장면에서
+NID·edge·구조선 목적함수가 방향을 유일하게 식별하지 못하는 문제가 남아 있다. 이
+실행은 센서 중심 문제와 방향/관측성 문제를 분리하는 진단이며, 결과 RT를 제품에
+적용하지 않는다.
+
+### 10.14.12 모델링 치수 재확인 및 81.05 mm 정정 실행 (2026-08-14)
+
+모델링 도면에서 LiDAR 회전 중심선과 CH1 카메라 중심의 수평 거리는 59.28 mm다. 이
+수평 성분은 기존 실행에도 `--camera-center-x-m 0.05928`로 이미 반영되어 있었다.
+운영자가 수직 차이를 83.05 mm에서 81.05 mm로 정정했으므로 현재 설치 계약은 다음과
+같다.
+
+```text
+LiDAR frame = +x right, +y down, +z forward
+C_L = (+0.05928, -0.08105, 0) m
+|C_L| = 0.100415 m
+```
+
+이 값은 각 방향 후보의 `t=-R*C_L`과 Ceres 5 mm camera-center prior에 사용한다.
+geometry-first v4와 같은 조명 ON 5세트·5° yaw/down 조건으로 다시 실행한 결과,
+yaw/down 선택은 `165°/20°`로 유지됐고 최종 상태도
+`FAIL / NID_IMPROVEMENT_INSUFFICIENT`였다. edge mean은 25.36→26.12 px,
+NID 개선률은 -0.610→-0.506%로 변했다. 따라서 2 mm 정정은 올바른 translation과
+시차 계산에 필요하지만 현재 방향 식별 실패의 주원인은 아니다.
+
+산출물:
+
+```text
+generated/repeat_test_sample_20260814_light_on_geometry_first_5deg_v5_offset_81p05mm/
+```
+
+### 10.14.13 Geometry 식별력·수직 구조 보강 및 v9 결과 (2026-08-14)
+
+기존 실패에는 서로 다른 두 문제가 겹쳐 있었다.
+
+1. 전역 geometry NID는 위치를 버린 histogram이라, 반복되는 벽·바닥 분포를 다른 방향에
+   놓아도 점수가 비슷했다.
+2. 영상 소실점 후보를 지지선 수 상위 3개만 보존해 실제 수직군이 탈락했고, 후속 down
+   탐색도 5~20°로 제한되어 실제 수직 증거에 도달하지 못했다.
+
+이를 위해 range/normal 분리 2×2 spatial NID, entropy gate, 평면 경계·반복 폐색 구조선,
+2D–3D 선분 1:1 대응, 영상 소실점–LiDAR 중력/벽축 Manhattan 잔차를 추가했다. 소실점은
+최대 12개를 유지하고 각 장면의 후보·지지선·중력축 오차를
+`03a_manhattan_vanishing_directions.csv`에 기록한다.
+
+v8의 장면 0/2/3/4에서 반복된 수직 후보는 camera direction
+`(-0.099, 0.827, 0.553)` 부근이었다. `asin(0.553)=33.6°`이므로 영상은 기존 제한보다
+큰 하향각을 지지한다. down 25~40°, yaw 155~185°를 5°로 다시 탐색한 v9 결과는 다음과
+같다.
+
+| 항목 | v8 | v9 |
+|---|---:|---:|
+| grid down | 15° | 30° |
+| refinement down | 14.37° | 27.81° |
+| 장면별 수직 오차 | 10.23~20.40° | 3.86~7.88° |
+| 학습 장면 통과 | 1/4 | 4/4 |
+| aggregate edge mean | 약 31.99 px | 35.96 px |
+| NID 개선 | 약 +3.8% | +1.7475% |
+| 최종 판정 | `PER_SCENE_VALIDATION_FAILED` | `HOLDOUT_VALIDATION_FAILED` |
+
+v9 hold-out의 수직 오차는 7.84°로 정상 범위지만 edge mean이 `40.8389 px`여서 40 px
+gate를 0.8389 px 초과했다. 즉 최신 FAIL 원인은 더 이상 수직군 부족이 아니라 독립
+scan에 대한 edge 일반화다. 기준을 느슨하게 바꾸지 않고 FAIL을 유지한다.
+
+또한 최종 후보 선택 후 장면별 gate 결과를 다시 덮어써 PASS로 기록하던 실행기 순서
+결함을 수정했다. 같은 v8 조건을 재실행하면 candidate gate가 PASS여도 최종 결과는
+`PER_SCENE_VALIDATION_FAILED`로 정확히 기록된다.
+
+F2P signal NMI는 거리 제곱·입사각·range-bin median/MAD 보정까지 구현했지만 Manual RT
+perturbation에서 worse ratio `0.5833`, median margin `0.000633`으로 식별력이 부족했다.
+가중치는 계속 0이며 보조 진단 파일로만 사용한다.
+
+다음 시험은 v9 주변 `down=27~33°`, `yaw=165~171°`의 1° fine grid다. 이후 독립
+hold-out을 최소 3쌍으로 늘려 특정 scan 우연인지 구조적 오차인지 구분한다.
+
+### 10.14.14 1° fine 탐색과 공면 range-edge 오검출 수정 (2026-08-14)
+
+v9 주변을 1°로 탐색한 v10은 `yaw=167°`, grid down `28°`, refinement down
+`28.6895°`를 선택했다. bounded yaw 구간의 양 끝을 이웃으로 잘못 연결하던 score-map
+topology도 수정해 전체 360°일 때만 순환하도록 했다. 학습은 4/4 PASS였지만 hold-out
+edge mean이 `40.4238 px`라서 `HOLDOUT_VALIDATION_FAILED`였다.
+
+새 `07a_projection_final_edge_residual.png`에서 hold-out의 p50은 `15.30 px`인데 p90은
+`110.01 px`였다. 일부 true edge만 잘 맞고 책상 상판·벽 내부의 많은 점이 큰 오차를
+만드는 long-tail 분포였다. raw range gap만 사용해 비스듬한 공면의 완만한 거리 변화까지
+edge로 선택한 것이 직접 원인이다.
+
+공통 edge 추출기에 다음을 적용했다.
+
+- 같은 plane label의 인접점 제외
+- 호환 normal과 40 mm 이하 상호 접평면 거리인 점 제외
+- 현재 gap이 같은 축의 앞뒤 gap보다 기본 2배 이상인 local contrast gate
+- invalid ratio 입력 거절 및 실행 리포트에 정책·비율 기록
+
+동일 조건 v11에서는 장면별 LiDAR edge가 약 6.3k에서 2.9k로 줄었다. 선택 방향은
+`yaw=167°`, grid down `28°`, refinement down `27.3755°`이고 학습 4/4와 hold-out
+1/1이 모두 통과했다. hold-out 주요 값은 다음과 같다.
+
+| 항목 | 값 |
+|---|---:|
+| visible/aligned edge | 134 / 76 |
+| projected ratio | 0.567164 |
+| mean edge distance | 37.1998 px |
+| geometry NID / active cells | 0.951842 / 7 |
+| 구조선 visible/matched | 18 / 18 |
+| 수평/수직 대응 | 4 / 13 |
+| Manhattan 수직 오차 | 6.8348° |
+| 내부 상태 | PASS |
+
+Top-view 광축과 2D 책상/벽 투영도 이전 바닥·반대 방향 오선택보다 물리적으로 일관된다.
+그러나 hold-out이 한 장뿐이고 독립 ground truth가 없다. Manual 예비 RT와도 회전
+`8.5588°`, translation norm `0.12646 m` 차이가 난다. 그러므로 이 결과는 코드·현재
+분할의 최초 실데이터 내부 gate PASS이지 제품 RT/conformance PASS가 아니다. 다음 승인
+조건은 구조와 조명이 다른 독립 hold-out 3쌍 이상에서 RT 반복성을 검증하는 것이다.
+
+설정 검증과 실행 metadata를 보완한 최종 코드 v12에서도 같은 RT, 학습 4/4,
+hold-out 1/1 PASS가 재현됐다. v11/v12의 CH1 matching 및 3D preview checksum도 동일하다.
+재현 산출물은
+`generated/repeat_test_sample_20260814_light_on_structural_nid_manhattan_v12_fine1deg_coplanar_edge/`
+에 있다.
+
+### 10.14.15 조명 ON RT의 나이트비전 교차검증 — 참고 진단 (2026-08-14)
+
+나이트비전은 현재 제품 요구사항 및 승인 gate 범위가 아니다. 이 절의 FAIL은 조건 변화
+민감도를 관찰한 참고 진단이며 조명 ON v12 내부 PASS를 취소하지 않는다.
+
+`repeat_test_sample`의 뒤 5쌍이 조명 OFF/나이트비전임을 운영자가 확인했다. 먼저 해당
+5쌍에서 RT를 다시 추정한 v13은 training 1/4, holdout 0/1로 실패했다. 이어 조명 ON
+v12 RT를 전혀 변경하지 않고 나이트비전 5쌍 모두에 적용하는 고정 pose 검증 경로를
+추가했다.
+
+고정 RT v14도 1/5만 통과했고 나머지는 모두 `EDGE_ALIGNMENT_POOR`였다. 실패 장면의
+mean edge distance는 `44.41~54.39 px`로 40 px gate를 넘었다. 조명 ON 대비
+나이트비전 Canny edge 수는 평균 `53.8%` 감소했다. v13 거절 후보와 v12 RT 차이는
+회전 `3.148°`, 이동 `3.566 mm`로 비교적 작았다.
+
+따라서 참고 실행의 실패는 RT가 완전히 다른 방향으로 이동한 것보다 나이트비전의 2D
+edge 분포 변화에 edge-distance gate가 민감한 증상이다. 현재 개발은 이를 수정 대상으로
+삼지 않는다. 조명 ON 상태에서 구조가 다른 독립 holdout 최소 3쌍을 확보해 v12 RT의
+반복성을 먼저 검증하며, day/night 공통 처리는 후속 선택 과제로 보류한다.
+
+산출물:
+
+```text
+generated/repeat_test_sample_20260814_night_vision_fixed_light_v12_rt_v14/
+  fixed_pose_validation_result.json
+  fixed_pose_scene_validation.csv
+  debug/scene_*/07a_projection_final_edge_residual.png
+```

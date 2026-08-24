@@ -390,7 +390,7 @@ noise/dropout/seed를 받고 `load → project → generate → write`를 실행
 - 인공 range discontinuity의 LiDAR edge 추출
 - 단일/다중 최적화 성공
 - 목적함수 비악화
-- 과도 update 거절과 prior fallback
+- 과도 update 거절과 fail-safe prior 반환(후보 fallback 승격 없음)
 - blank camera 거절
 - 실패 경로 runtime 기록
 - 동일 pose 오차 0

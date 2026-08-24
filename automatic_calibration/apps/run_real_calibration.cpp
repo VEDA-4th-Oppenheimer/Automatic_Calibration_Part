@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <map>
 #include <numeric>
 #include <nlohmann/json.hpp>
 #include <opencv2/calib3d.hpp>
@@ -14,12 +15,14 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
 namespace {
 constexpr double kPi = 3.14159265358979323846;
+constexpr double kFinalistSeparationAngleDeg = 15.0;
 double radians(double degrees) { return degrees * kPi / 180.0; }
 using Args = std::unordered_map<std::string, std::string>;
 struct CameraCalibration {
@@ -94,8 +97,98 @@ std::vector<fs::path> files(const fs::path &dir,
         std::find(extensions.begin(), extensions.end(),
                   entry.path().extension().string()) != extensions.end())
       out.push_back(entry.path());
+  if (out.empty())
+    for (const auto &entry : fs::recursive_directory_iterator(dir))
+      if (entry.is_regular_file() &&
+          std::find(extensions.begin(), extensions.end(),
+                    entry.path().extension().string()) != extensions.end())
+        out.push_back(entry.path());
   std::sort(out.begin(), out.end());
   return out;
+}
+bool hasSuffix(const std::string &text, const std::string &suffix) {
+  return text.size() >= suffix.size() &&
+         text.compare(text.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+struct InputFilePair {
+  fs::path image;
+  fs::path scan;
+};
+std::vector<InputFilePair> inputFilePairs(const fs::path &dir,
+                                          int camera_channel) {
+  auto images = files(dir, {".png", ".jpg", ".jpeg"});
+  auto scans = files(dir, {".json"});
+  if (camera_channel > 0) {
+    const std::string channel_suffix_u = "_CH" + std::to_string(camera_channel);
+    const std::string channel_suffix_d = "-CH" + std::to_string(camera_channel);
+    const bool has_channel_tag = std::any_of(
+        images.begin(), images.end(), [&](const fs::path &p) {
+          const std::string stem = p.stem().string();
+          return stem.find("_CH") != std::string::npos ||
+                 stem.find("-CH") != std::string::npos;
+        });
+    if (has_channel_tag) {
+      images.erase(
+          std::remove_if(images.begin(), images.end(),
+                         [&](const fs::path &path) {
+                           const std::string stem = path.stem().string();
+                           return !hasSuffix(stem, channel_suffix_u) &&
+                                  !hasSuffix(stem, channel_suffix_d);
+                         }),
+          images.end());
+    }
+  }
+  scans.erase(
+      std::remove_if(scans.begin(), scans.end(),
+                     [](const fs::path &path) {
+                       const std::string filename = path.filename().string();
+                       return filename == "camera_intrinsic.json" ||
+                              filename == "manifest.json" ||
+                              filename == "calibration_result.json" ||
+                              filename == "full_search_baseline_result.json" ||
+                              filename == "reference_rt_perturbation_result.json" ||
+                              filename == "installation_constrained_rt.json";
+                     }),
+      scans.end());
+  if (images.size() != scans.size() || images.empty())
+    throw std::runtime_error(
+        "Expected at least one image/LiDAR JSON pair; select a camera "
+        "channel when reading a packaged multi-channel dataset");
+
+  const bool nested = std::any_of(images.begin(), images.end(), [&](const auto &p) {
+    return p.parent_path() != dir;
+  });
+  std::vector<InputFilePair> pairs;
+  if (!nested) {
+    for (std::size_t i = 0; i < images.size(); ++i)
+      pairs.push_back({images[i], scans[i]});
+    return pairs;
+  }
+
+  std::map<fs::path, fs::path> image_by_directory;
+  std::map<fs::path, fs::path> scan_by_directory;
+  for (const auto &image : images)
+    if (!image_by_directory.emplace(image.parent_path(), image).second)
+      throw std::runtime_error("Multiple selected camera images in package: " +
+                               image.parent_path().string());
+  for (const auto &scan : scans)
+    if (!scan_by_directory.emplace(scan.parent_path(), scan).second)
+      throw std::runtime_error("Multiple LiDAR JSON files in package: " +
+                               scan.parent_path().string());
+  for (const auto &[parent, image] : image_by_directory) {
+    const auto scan = scan_by_directory.find(parent);
+    if (scan == scan_by_directory.end())
+      throw std::runtime_error("No LiDAR JSON for image package: " +
+                               parent.string());
+    pairs.push_back({image, scan->second});
+  }
+  if (pairs.size() != scan_by_directory.size())
+    throw std::runtime_error("A LiDAR package has no selected camera image");
+  std::sort(pairs.begin(), pairs.end(), [](const auto &a, const auto &b) {
+    return std::make_tuple(a.scan.filename(), a.image.filename()) <
+           std::make_tuple(b.scan.filename(), b.image.filename());
+  });
+  return pairs;
 }
 double focalFromFov(int image_size, double fov_deg) {
   return image_size / (2.0 * std::tan(radians(fov_deg) * 0.5));
@@ -1309,6 +1402,11 @@ nlohmann::json resultJson(const auto_calib::CalibrationResult &r,
          r.metrics.max_coarse_edge_active_spatial_cells},
         {"edge_coverage_ratio", r.metrics.edge_coverage_ratio},
         {"nid_coverage_ratio", r.metrics.nid_coverage_ratio},
+        {"global_edge_coverage_ratio", r.metrics.global_edge_coverage_ratio},
+        {"global_nid_coverage_ratio", r.metrics.global_nid_coverage_ratio},
+        {"finalist_confidence_margin", r.metrics.finalist_confidence_margin},
+        {"tesl_ratio", r.metrics.tesl_ratio},
+        {"absolute_support_pass", r.metrics.absolute_support_pass},
         {"edge_spatial_coverage_ratio",
          r.metrics.edge_spatial_coverage_ratio},
         {"coverage_objective", r.metrics.coverage_objective},
@@ -1326,6 +1424,15 @@ nlohmann::json resultJson(const auto_calib::CalibrationResult &r,
          r.metrics.vertical_structural_matches},
         {"structural_projected_points",
          r.metrics.structural_projected_points},
+        {"total_explained_structural_length",
+         r.metrics.total_explained_structural_length},
+        {"asymmetric_structural_weight",
+         r.metrics.asymmetric_structural_weight},
+        {"multi_criteria_confidence_score",
+         r.metrics.multi_criteria_confidence_score},
+        {"ground_normal_valid", r.metrics.ground_normal_valid},
+        {"ground_height_m", r.metrics.ground_height_m},
+        {"ground_tilt_deg", r.metrics.ground_tilt_deg},
         {"final_horizontal_structural_objective",
          r.metrics.final_horizontal_structural_objective},
         {"final_vertical_structural_objective",
@@ -1499,7 +1606,8 @@ BasinSelection writeCorrectedScoreMap(
     const std::vector<double> &downward_degrees, const fs::path &path,
     std::size_t minimum_structural_direction_groups, bool circular_yaw,
     double alpha = 0.8, double sigma_yaw_deg = 5.0,
-    double sigma_down_deg = 5.0) {
+    double sigma_down_deg = 5.0,
+    std::vector<BasinSelection> *distinct_basins = nullptr) {
   std::ofstream out(path);
   if (!out)
     throw std::runtime_error("Cannot write corrected orientation score map");
@@ -1516,9 +1624,13 @@ BasinSelection writeCorrectedScoreMap(
               scores[c].horizontal_structural_segments > 0) +
           static_cast<std::size_t>(
               scores[c].vertical_structural_segments > 0);
+      const bool ground_ok = scores[c].ground_normal_valid;
+      const bool tesl_ok = (scores[c].total_explained_structural_length >= 0.0);
       const double raw = structural_groups >=
                                      minimum_structural_direction_groups &&
-                                 scores[c].overlap_valid
+                                 scores[c].overlap_valid &&
+                                 ground_ok &&
+                                 tesl_ok
                              ? scores[c].raw_objective
                              : std::numeric_limits<double>::infinity();
       double weighted_sum = 0.0;
@@ -1550,6 +1662,7 @@ BasinSelection writeCorrectedScoreMap(
           if (neighbor_structural_groups >=
                   minimum_structural_direction_groups &&
               row[static_cast<std::size_t>(cc)].overlap_valid &&
+              row[static_cast<std::size_t>(cc)].ground_normal_valid &&
               std::isfinite(row[static_cast<std::size_t>(cc)]
                                 .raw_objective)) {
             const double dyaw =
@@ -1579,43 +1692,113 @@ BasinSelection writeCorrectedScoreMap(
       }
     }
   }
-  if (!std::isfinite(best.corrected_score))
+  if (!std::isfinite(best.corrected_score)) {
+    if (distinct_basins)
+      distinct_basins->push_back(best);
     return best;
-  const double threshold = best.corrected_score + 0.02;
-  std::vector<std::vector<bool>> visited(corrected.size());
-  for (std::size_t r = 0; r < corrected.size(); ++r)
-    visited[r].assign(corrected[r].size(), false);
-  std::vector<std::pair<std::size_t, std::size_t>> queue{
-      {best.result_index, best.column}};
-  visited[best.result_index][best.column] = true;
-  while (!queue.empty()) {
-    const auto [r, c] = queue.back();
-    queue.pop_back();
-    ++best.basin_count;
-    for (int dr = -1; dr <= 1; ++dr)
-      for (int dc = -1; dc <= 1; ++dc) {
-        if (dr == 0 && dc == 0)
-          continue;
+  }
+
+  // Identify all distinct local minima in the smoothed score map
+  std::vector<BasinSelection> all_basins;
+  for (std::size_t r = 0; r < corrected.size(); ++r) {
+    for (std::size_t c = 0; c < corrected[r].size(); ++c) {
+      const double val = corrected[r][c];
+      if (!std::isfinite(val))
+        continue;
+      bool is_local_min = true;
+      for (int dr = -1; dr <= 1 && is_local_min; ++dr) {
         const int rr = static_cast<int>(r) + dr;
         if (rr < 0 || rr >= static_cast<int>(corrected.size()))
           continue;
-        const auto &row = corrected[static_cast<std::size_t>(rr)];
-        if (row.empty())
-          continue;
-        int cc = static_cast<int>(c) + dc;
-        if (circular_yaw)
-          cc = (cc + static_cast<int>(row.size())) %
-               static_cast<int>(row.size());
-        else if (cc < 0 || cc >= static_cast<int>(row.size()))
-          continue;
-        const auto column = static_cast<std::size_t>(cc);
-        if (!visited[static_cast<std::size_t>(rr)][column] &&
-            row[column] <= threshold) {
-          visited[static_cast<std::size_t>(rr)][column] = true;
-          queue.push_back({static_cast<std::size_t>(rr), column});
+        for (int dc = -1; dc <= 1 && is_local_min; ++dc) {
+          if (dr == 0 && dc == 0)
+            continue;
+          int cc = static_cast<int>(c) + dc;
+          if (circular_yaw)
+            cc = (cc + static_cast<int>(corrected[rr].size())) %
+                 static_cast<int>(corrected[rr].size());
+          else if (cc < 0 || cc >= static_cast<int>(corrected[rr].size()))
+            continue;
+          if (std::isfinite(corrected[rr][cc]) && corrected[rr][cc] < val)
+            is_local_min = false;
         }
       }
+      if (is_local_min) {
+        const auto yaw =
+            results[r].coarse_orientation_scores[c].yaw_offset_deg;
+        all_basins.push_back({r, c, yaw, val, 1});
+      }
+    }
   }
+
+  if (all_basins.empty())
+    all_basins.push_back(best);
+  std::sort(all_basins.begin(), all_basins.end(),
+            [](const BasinSelection &a, const BasinSelection &b) {
+              return a.corrected_score < b.corrected_score;
+            });
+
+  // Calculate basin extent via flood-fill for candidates
+  for (auto &b_cand : all_basins) {
+    const double threshold = b_cand.corrected_score + 0.02;
+    std::vector<std::vector<bool>> visited(corrected.size());
+    for (std::size_t r = 0; r < corrected.size(); ++r)
+      visited[r].assign(corrected[r].size(), false);
+    std::vector<std::pair<std::size_t, std::size_t>> queue{
+        {b_cand.result_index, b_cand.column}};
+    visited[b_cand.result_index][b_cand.column] = true;
+    std::size_t count = 0;
+    while (!queue.empty()) {
+      const auto [r, c] = queue.back();
+      queue.pop_back();
+      ++count;
+      for (int dr = -1; dr <= 1; ++dr) {
+        for (int dc = -1; dc <= 1; ++dc) {
+          if (dr == 0 && dc == 0)
+            continue;
+          const int rr = static_cast<int>(r) + dr;
+          if (rr < 0 || rr >= static_cast<int>(corrected.size()))
+            continue;
+          const auto &row = corrected[static_cast<std::size_t>(rr)];
+          if (row.empty())
+            continue;
+          int cc = static_cast<int>(c) + dc;
+          if (circular_yaw)
+            cc = (cc + static_cast<int>(row.size())) %
+                 static_cast<int>(row.size());
+          else if (cc < 0 || cc >= static_cast<int>(row.size()))
+            continue;
+          const auto column = static_cast<std::size_t>(cc);
+          if (!visited[static_cast<std::size_t>(rr)][column] &&
+              row[column] <= threshold) {
+            visited[static_cast<std::size_t>(rr)][column] = true;
+            queue.push_back({static_cast<std::size_t>(rr), column});
+          }
+        }
+      }
+    }
+    b_cand.basin_count = count;
+  }
+
+  // Deduplicate within layer by >= 30 deg yaw
+  std::vector<BasinSelection> filtered_basins;
+  for (const auto &b_cand : all_basins) {
+    if (std::all_of(filtered_basins.begin(), filtered_basins.end(),
+                    [&](const BasinSelection &acc) {
+                      return circularYawDistanceDeg(acc.yaw_deg,
+                                                    b_cand.yaw_deg) >= 30.0;
+                    })) {
+      filtered_basins.push_back(b_cand);
+    }
+  }
+
+  if (filtered_basins.empty())
+    filtered_basins.push_back(best);
+
+  if (distinct_basins)
+    *distinct_basins = filtered_basins;
+
+  best = filtered_basins.front();
   return best;
 }
 nlohmann::json writeSignalNmiConformance(
@@ -1743,6 +1926,8 @@ std::vector<std::string> sceneValidationFailures(
       metrics.signal_active_spatial_cells <
           config.minimum_signal_nmi_active_spatial_cells)
     failures.push_back("SIGNAL_NMI_ENTROPY_INSUFFICIENT");
+  if (config.enable_ground_plane_constraint && !metrics.ground_normal_valid)
+    failures.push_back("GEOMETRY_GROUND_INCONSISTENT");
   return failures;
 }
 nlohmann::json writePoseSceneValidation(
@@ -1753,11 +1938,15 @@ nlohmann::json writePoseSceneValidation(
   if (!csv)
     throw std::runtime_error("Cannot write pose-scene validation CSV");
   csv << "scene,pass,failures,visible_edges,aligned_edges,projected_ratio,"
-         "edge_active_cells,mean_edge_px,nid_projected,nid_cells,geometry_nid,range_nid,"
-         "normal_nid,structural_visible,structural_matched,horizontal_matches,"
-         "vertical_matches,manhattan_inliers,manhattan_horizontal_axes,"
-         "manhattan_vertical_error_deg,signal_projected,signal_cells,"
-         "signal_nmi\n"
+         "edge_active_cells,mean_edge_px,edge_objective,nid_projected,nid_cells,"
+         "geometry_nid,geometry_nid_objective,range_nid,normal_nid,"
+         "structural_visible,structural_matched,horizontal_matches,"
+         "vertical_matches,total_explained_structural_length,asymmetric_structural_weight,"
+         "structural_objective,structural_score_weight,"
+         "ground_valid,ground_height_m,ground_tilt_deg,"
+         "manhattan_inliers,manhattan_horizontal_axes,"
+         "manhattan_vertical_error_deg,manhattan_objective,signal_projected,"
+         "signal_cells,signal_nmi,signal_nmi_objective\n"
       << std::setprecision(12);
   std::size_t passed = 0;
   nlohmann::json scenes = nlohmann::json::array();
@@ -1776,17 +1965,26 @@ nlohmann::json writePoseSceneValidation(
         << failure_text.str() << ',' << m.visible_edge_points << ','
         << m.aligned_edge_points << ',' << m.projected_ratio << ','
         << m.edge_active_spatial_cells << ','
-        << m.mean_edge_distance_px << ',' << m.nid_projected_points << ','
+        << m.mean_edge_distance_px << ',' << m.edge_objective << ','
+        << m.nid_projected_points << ','
         << m.nid_active_spatial_cells << ',' << m.geometry_nid << ','
-        << m.range_nid << ',' << m.normal_nid << ','
+        << m.geometry_nid_objective << ',' << m.range_nid << ','
+        << m.normal_nid << ','
         << m.structural_visible_segments << ','
         << m.structural_matched_segments << ','
         << m.horizontal_structural_matches << ','
         << m.vertical_structural_matches << ','
+        << m.total_explained_structural_length << ','
+        << m.asymmetric_structural_weight << ',' << m.structural_objective
+        << ',' << m.structural_score_weight << ','
+        << (m.ground_normal_valid ? 1 : 0) << ','
+        << m.ground_height_m << ','
+        << m.ground_tilt_deg << ','
         << m.manhattan_vertical_inliers << ',' << m.manhattan_horizontal_axes
         << ',' << m.manhattan_vertical_error_deg << ','
-        << m.signal_projected_points << ',' << m.signal_active_spatial_cells
-        << ',' << m.signal_nmi << '\n';
+        << m.manhattan_objective << ',' << m.signal_projected_points << ','
+        << m.signal_active_spatial_cells << ',' << m.signal_nmi << ','
+        << m.signal_nmi_objective << '\n';
     scenes.push_back({{"scene", i},
                       {"pass", failures.empty()},
                       {"failures", failures}});
@@ -1873,32 +2071,35 @@ int main(int argc, char **argv) {
       throw std::invalid_argument(
           "--search-strategy must be staged or legacy");
     const bool staged_search = search_strategy == "staged";
-    auto images = files(input_dir, {".png", ".jpg", ".jpeg"});
-    auto scans = files(input_dir, {".json"});
-    if (images.size() != scans.size() || images.empty())
-      throw std::runtime_error(
-          "Expected at least one sorted one-to-one image/JSON pair");
+    const int camera_channel =
+        static_cast<int>(value(args, "--camera-channel", 0.0));
+    auto input_pairs = inputFilePairs(input_dir, camera_channel);
     const double pair_start_value = value(args, "--pair-start", 0.0);
     const double pair_count_value =
-        value(args, "--pair-count", static_cast<double>(images.size()));
+        value(args, "--pair-count", static_cast<double>(input_pairs.size()));
     if (pair_start_value < 0.0 || pair_count_value < 1.0 ||
         std::floor(pair_start_value) != pair_start_value ||
         std::floor(pair_count_value) != pair_count_value ||
-        pair_start_value + pair_count_value > images.size())
+        pair_start_value + pair_count_value > input_pairs.size())
       throw std::runtime_error(
           "--pair-start/--pair-count select an invalid pair range");
     const auto pair_start = static_cast<std::size_t>(pair_start_value);
     const auto pair_count = static_cast<std::size_t>(pair_count_value);
-    images = std::vector<fs::path>(images.begin() + pair_start,
-                                   images.begin() + pair_start + pair_count);
-    scans = std::vector<fs::path>(scans.begin() + pair_start,
-                                  scans.begin() + pair_start + pair_count);
+    input_pairs = std::vector<InputFilePair>(
+        input_pairs.begin() + pair_start,
+        input_pairs.begin() + pair_start + pair_count);
+    std::vector<fs::path> images;
+    std::vector<fs::path> scans;
+    images.reserve(input_pairs.size());
+    scans.reserve(input_pairs.size());
+    for (const auto &pair : input_pairs) {
+      images.push_back(pair.image);
+      scans.push_back(pair.scan);
+    }
     const cv::Mat first_image =
         cv::imread(images.front().string(), cv::IMREAD_COLOR);
     if (first_image.empty())
       throw std::runtime_error("Cannot read image: " + images.front().string());
-    const int camera_channel =
-        static_cast<int>(value(args, "--camera-channel", 0.0));
     const std::string ldc_enabled = textValue(args, "--ldc-enabled", "unknown");
     if (ldc_enabled != "true" && ldc_enabled != "false" &&
         ldc_enabled != "unknown")
@@ -2067,6 +2268,12 @@ int main(int argc, char **argv) {
     config.signal_nmi_weight = value(args, "--signal-nmi-weight", 0.0);
     config.edge_alignment_weight = value(args, "--edge-weight", 0.25);
     config.structural_line_weight = value(args, "--line-weight", 0.20);
+    config.structural_normal_weight =
+        value(args, "--line-normal-weight", 0.15);
+    config.structural_line_sigma_px =
+        value(args, "--line-sigma-px", 10.0);
+    config.enable_normal_gated_line_matching =
+        textValue(args, "--enable-normal-gated-line-matching", "true") == "true";
     config.manhattan_direction_weight =
         value(args, "--manhattan-weight", 0.15);
     const double minimum_manhattan_vertical_inliers =
@@ -2123,6 +2330,18 @@ int main(int argc, char **argv) {
         static_cast<std::size_t>(std::lround(plane_neighbor_radius));
     config.maximum_plane_intersection_boundary_distance_m =
         value(args, "--plane-boundary-distance-m", 0.10);
+    config.enable_ground_plane_constraint =
+        textValue(args, "--enable-ground-plane-constraint", "true") == "true";
+    config.minimum_camera_ground_height_m =
+        value(args, "--ground-height-min-m", 0.8);
+    config.maximum_camera_ground_height_m =
+        value(args, "--ground-height-max-m", 5.0);
+    config.minimum_camera_downward_pitch_deg =
+        value(args, "--ground-pitch-min-deg", 5.0);
+    config.maximum_camera_downward_pitch_deg =
+        value(args, "--ground-pitch-max-deg", 60.0);
+    config.maximum_camera_ground_tilt_deg =
+        value(args, "--ground-tilt-max-deg", 85.0);
     if (config.normalized_information_distance_weight < 0.0 ||
         config.edge_alignment_weight < 0.0 ||
         config.signal_nmi_weight < 0.0 ||
@@ -2153,9 +2372,9 @@ int main(int argc, char **argv) {
         config.minimum_relative_edge_spatial_coverage > 1.0 ||
         config.coverage_penalty_weight < 0.0)
       throw std::runtime_error("Invalid relative coverage configuration");
-    config.maximum_mean_edge_distance_px = 40.0;
     config.minimum_objective_improvement_ratio = 0.05;
-    config.minimum_nid_improvement_ratio = 0.01;
+    config.minimum_nid_improvement_ratio =
+        value(args, "--minimum-nid-improvement", 0.01);
     config.minimum_signal_nmi_improvement_ratio =
         value(args, "--minimum-signal-nmi-improvement", 0.0);
     config.residual_cap_px = 30.0;
@@ -2178,6 +2397,8 @@ int main(int argc, char **argv) {
       config.coarse_yaw_max_rad = radians(yaw_max_deg);
     }
     config.minimum_multistart_objective_margin = 0.02;
+    config.minimum_finalist_confidence_margin =
+        value(args, "--minimum-finalist-confidence-margin", 0.02);
     config.rotation_search_bound_rad = radians(10.0);
     config.translation_search_bound_m = 0.10;
     config.maximum_rotation_update_rad = kPi;
@@ -2486,6 +2707,12 @@ int main(int argc, char **argv) {
                 return score(results[a]) < score(results[b]);
               });
     std::size_t selected = ranking.front();
+    double finalist_objective_margin = 1.0;
+    struct StagedFinalistRecord {
+      std::size_t result_index = 0;
+      double training_pass_ratio = 0.0;
+    };
+    std::vector<StagedFinalistRecord> staged_finalists;
     bool final_success = false;
     std::string final_reason = "SEARCH_NOT_REFINED";
     auto display_transform = results[selected].candidate_t_camera_lidar;
@@ -2509,6 +2736,34 @@ int main(int argc, char **argv) {
     std::size_t basin_proposal = selected;
     nlohmann::json orientation_layers = nlohmann::json::array();
     nlohmann::json search_stages = nlohmann::json::array();
+    std::size_t global_max_visible_edges = 0;
+    std::size_t global_max_nid_points = 0;
+    std::size_t global_max_edge_cells = 0;
+    double global_max_structural_length = 0.0;
+
+    for (const auto &res : results) {
+      global_max_visible_edges =
+          std::max(global_max_visible_edges, res.metrics.visible_edge_points);
+      global_max_nid_points =
+          std::max(global_max_nid_points, res.metrics.nid_projected_points);
+      global_max_edge_cells =
+          std::max(global_max_edge_cells, res.metrics.edge_active_spatial_cells);
+      global_max_structural_length =
+          std::max(global_max_structural_length,
+                   res.metrics.total_explained_structural_length);
+      for (const auto &score : res.coarse_orientation_scores) {
+        global_max_visible_edges =
+            std::max(global_max_visible_edges, score.visible_edge_points);
+        global_max_nid_points =
+            std::max(global_max_nid_points, score.nid_projected_points);
+        global_max_edge_cells =
+            std::max(global_max_edge_cells, score.edge_active_spatial_cells);
+        global_max_structural_length =
+            std::max(global_max_structural_length,
+                     score.total_explained_structural_length);
+      }
+    }
+
     if (staged_search) {
       struct LocalCandidate {
         auto_calib::CalibrationResult result;
@@ -2572,6 +2827,18 @@ int main(int argc, char **argv) {
                   radians(seed.yaw_deg - radius_deg);
               stage_config.coarse_yaw_max_rad =
                   radians(seed.yaw_deg + radius_deg);
+              stage_config.global_reference_visible_edge_points =
+                  global_max_visible_edges;
+              // NID support changes substantially between unrelated camera
+              // sectors.  A global maximum can reject every yaw in an otherwise
+              // valid local basin, so keep the configured relative gate local
+              // to this basin's yaw window.  Global edge/cell references remain
+              // useful soft coverage diagnostics.
+              stage_config.global_reference_nid_projected_points = 0;
+              stage_config.global_reference_edge_active_cells =
+                  global_max_edge_cells;
+              stage_config.global_reference_structural_length =
+                  global_max_structural_length;
               const double sign =
                   explicit_camera_center || seed.prior.translation_m.x() >= 0.0
                       ? 1.0
@@ -2582,11 +2849,18 @@ int main(int argc, char **argv) {
               applySelectionGates(&result, minimum_structural_direction_groups,
                                   maximum_camera_downward_deg);
               const double objective = stage_score(result);
+              const bool ground_ok = !config.enable_ground_plane_constraint ||
+                                     result.metrics.ground_normal_valid;
+              const bool tesl_ok =
+                  (config.total_explained_structural_length_min <= 0.0 ||
+                   result.metrics.total_explained_structural_length >=
+                       config.total_explained_structural_length_min);
               const bool stage_gate_pass =
                   selectionEligible(result, minimum_structural_direction_groups,
                                     maximum_camera_downward_deg) &&
                   manhattanStageEligible(result, config,
-                                         calibration_observations.size());
+                                         calibration_observations.size()) &&
+                  ground_ok && tesl_ok;
               const double selected_yaw =
                   result.metrics.selected_multistart_yaw_deg;
               csv << seed_index << ',' << down << ',' << roll << ','
@@ -2632,12 +2906,13 @@ int main(int argc, char **argv) {
                 static_cast<std::ptrdiff_t>(start),
             candidate_downward_degrees.begin() +
                 static_cast<std::ptrdiff_t>(end));
+        std::vector<BasinSelection> layer_distinct;
         const auto layer_basin = writeCorrectedScoreMap(
             layer_results, layer_down,
             output_dir / ("orientation_corrected_layer_" +
                           std::to_string(layer) + ".csv"),
             minimum_structural_direction_groups, circular_yaw, 0.8, 5.0,
-            5.0);
+            5.0, &layer_distinct);
         orientation_layers.push_back(
             {{"layer", layer},
              {"optical_roll_deg", candidate_optical_roll_degrees[start]},
@@ -2648,10 +2923,12 @@ int main(int argc, char **argv) {
              {"selected_yaw_deg", layer_basin.yaw_deg},
              {"corrected_score", layer_basin.corrected_score},
              {"basin_candidate_count", layer_basin.basin_count}});
-        if (std::isfinite(layer_basin.corrected_score)) {
-          auto global_basin = layer_basin;
-          global_basin.result_index += start;
-          layer_basins.push_back({global_basin, start});
+        for (const auto &b_cand : layer_distinct) {
+          if (std::isfinite(b_cand.corrected_score)) {
+            auto global_basin = b_cand;
+            global_basin.result_index += start;
+            layer_basins.push_back({global_basin, start});
+          }
         }
       }
       if (!layer_basins.empty()) {
@@ -2730,7 +3007,8 @@ int main(int argc, char **argv) {
           const auto scene_pass_ratio =
               [&](const auto_calib::CalibrationResult &candidate,
                   const std::vector<auto_calib::CalibrationObservation>
-                      &source_observations) {
+                      &source_observations,
+                  const auto_calib::Transform &feature_prior) {
                 auto validation_observations = source_observations;
                 const auto &camera = candidate.success
                                          ? candidate.estimated_camera
@@ -2741,7 +3019,8 @@ int main(int argc, char **argv) {
                 for (auto &observation : validation_observations)
                   observation.camera = camera;
                 const auto metrics = auto_calib::evaluateCalibrationPoseScenes(
-                    validation_observations, transform, config);
+                    validation_observations, transform, config,
+                    &feature_prior);
                 const auto passed = std::count_if(
                     metrics.begin(), metrics.end(), [&](const auto &metric) {
                       return sceneValidationFailures(
@@ -2758,6 +3037,7 @@ int main(int argc, char **argv) {
             double objective = std::numeric_limits<double>::infinity();
             double training_pass_ratio = 0.0;
             bool scene_validation_pass = false;
+            auto_calib::MultiCriteriaConfidence confidence;
           };
           std::vector<Finalist> finalists;
           finalists.reserve(final_seed_indices.size());
@@ -2771,6 +3051,18 @@ int main(int argc, char **argv) {
             final_config.coarse_yaw_step_rad = radians(1.0);
             final_config.coarse_yaw_min_rad = radians(seed.yaw_deg - 1.0);
             final_config.coarse_yaw_max_rad = radians(seed.yaw_deg + 1.0);
+            final_config.global_reference_visible_edge_points =
+                global_max_visible_edges;
+            final_config.global_reference_nid_projected_points =
+                global_max_nid_points;
+            final_config.global_reference_edge_active_cells =
+                global_max_edge_cells;
+            final_config.global_reference_structural_length =
+                global_max_structural_length;
+            // Finalists have already passed basin-local overlap checks.  Keep
+            // global NID coverage in the objective/confidence, but do not use a
+            // different camera sector's point count as a hard rejection here.
+            final_config.minimum_relative_nid_coverage = 0.0;
             auto final_result = auto_calib::calibrateExtrinsicMultiScene(
                 scaled_observations(seed.focal_scale), seed.prior,
                 final_config);
@@ -2778,10 +3070,16 @@ int main(int argc, char **argv) {
                                 minimum_structural_direction_groups,
                                 maximum_camera_downward_deg);
             const double training_pass_ratio =
-                scene_pass_ratio(final_result, calibration_observations);
+                scene_pass_ratio(final_result, calibration_observations,
+                                 seed.prior);
             const bool scene_validation_pass =
                 final_result.success &&
                 training_pass_ratio >= minimum_scene_pass_ratio;
+            const auto conf = auto_calib::evaluateMultiCriteriaConfidence(
+                final_result, training_pass_ratio, final_config);
+            final_result.metrics.multi_criteria_confidence_score =
+                conf.total_confidence;
+
             const std::size_t final_index = results.size();
             results.push_back(std::move(final_result));
             priors.push_back(seed.prior);
@@ -2799,10 +3097,19 @@ int main(int argc, char **argv) {
             final_candidate["training_scene_pass_ratio"] =
                 training_pass_ratio;
             final_candidate["scene_validation_pass"] = scene_validation_pass;
+            final_candidate["multi_criteria_confidence_score"] =
+                conf.total_confidence;
+            final_candidate["scene_validation_confidence"] =
+                conf.scene_validation_score;
+            final_candidate["ground_geometry_confidence"] =
+                conf.ground_geometry_score;
+            final_candidate["tesl_confidence"] = conf.tesl_score;
+            final_candidate["spatial_nid_confidence"] = conf.spatial_nid_score;
             candidates.push_back(std::move(final_candidate));
             finalists.push_back(
                 {final_index, final_objective, training_pass_ratio,
-                 scene_validation_pass});
+                 scene_validation_pass, conf});
+            staged_finalists.push_back({final_index, training_pass_ratio});
             search_stages.push_back(
                 {{"stage", "ceres_final_candidate"},
                  {"seed_rank", finalist_rank + 1},
@@ -2811,32 +3118,201 @@ int main(int argc, char **argv) {
                  {"seed_roll_deg", seed.roll_deg},
                  {"candidate_index", final_index},
                  {"training_scene_pass_ratio", training_pass_ratio},
-                 {"scene_validation_pass", scene_validation_pass}});
+                 {"scene_validation_pass", scene_validation_pass},
+                 {"multi_criteria_confidence_score", conf.total_confidence}});
           }
-          const auto best_finalist = std::min_element(
-              finalists.begin(), finalists.end(), [&](const auto &a,
-                                                       const auto &b) {
-                if (a.scene_validation_pass != b.scene_validation_pass)
-                  return a.scene_validation_pass;
-                if (results[a.result_index].success != results[b.result_index].success)
-                  return results[a.result_index].success;
-                const bool a_eligible = selectionEligible(
-                    results[a.result_index], minimum_structural_direction_groups,
-                    maximum_camera_downward_deg);
-                const bool b_eligible = selectionEligible(
-                    results[b.result_index], minimum_structural_direction_groups,
-                    maximum_camera_downward_deg);
-                if (a_eligible != b_eligible)
-                  return a_eligible;
-                return a.objective < b.objective;
-              });
-          selected = best_finalist->result_index;
+
+          const auto quality_tier = [&](std::size_t finalist_idx) {
+            const auto &finalist = finalists[finalist_idx];
+            const auto &result = results[finalist.result_index];
+            return std::make_tuple(
+                finalist.scene_validation_pass, result.success,
+                selectionEligible(result, minimum_structural_direction_groups,
+                                  maximum_camera_downward_deg),
+                result.metrics.absolute_support_pass);
+          };
+          const auto objective_margin_between = [&](std::size_t better_idx,
+                                                     std::size_t other_idx) {
+            const double better = finalists[better_idx].objective;
+            const double other = finalists[other_idx].objective;
+            if (!std::isfinite(better) || !std::isfinite(other))
+              return std::isfinite(better) ? 1.0 : -1.0;
+            return (other - better) / std::max(std::abs(other), 1e-12);
+          };
+          const auto choose_finalist =
+              [&](const std::vector<std::size_t> &pool) {
+                const auto best_tier_it = std::max_element(
+                    pool.begin(), pool.end(), [&](std::size_t a,
+                                                  std::size_t b) {
+                      return quality_tier(a) < quality_tier(b);
+                    });
+                const auto best_tier = quality_tier(*best_tier_it);
+                std::vector<std::size_t> tier_pool;
+                for (const auto idx : pool)
+                  if (quality_tier(idx) == best_tier)
+                    tier_pool.push_back(idx);
+
+                std::sort(tier_pool.begin(), tier_pool.end(),
+                          [&](std::size_t a, std::size_t b) {
+                            if (finalists[a].objective !=
+                                finalists[b].objective)
+                              return finalists[a].objective <
+                                     finalists[b].objective;
+                            return a < b;
+                          });
+                const std::size_t objective_best = tier_pool.front();
+                if (tier_pool.size() == 1 ||
+                    objective_margin_between(objective_best, tier_pool[1]) >=
+                        config.minimum_multistart_objective_margin)
+                  return objective_best;
+
+                std::vector<std::size_t> objective_ties;
+                for (const auto idx : tier_pool)
+                  if (idx == objective_best ||
+                      objective_margin_between(objective_best, idx) <
+                          config.minimum_multistart_objective_margin)
+                    objective_ties.push_back(idx);
+
+                const auto structural_length = [&](std::size_t idx) {
+                  return results[finalists[idx].result_index]
+                      .metrics.total_explained_structural_length;
+                };
+                std::sort(objective_ties.begin(), objective_ties.end(),
+                          [&](std::size_t a, std::size_t b) {
+                            if (structural_length(a) != structural_length(b))
+                              return structural_length(a) > structural_length(b);
+                            return a < b;
+                          });
+                constexpr double kStructuralTieBreakRatio = 0.10;
+                if (objective_ties.size() == 1)
+                  return objective_ties.front();
+                const double best_structural =
+                    structural_length(objective_ties.front());
+                const double second_structural =
+                    structural_length(objective_ties[1]);
+                const double structural_gap =
+                    (best_structural - second_structural) /
+                    std::max({std::abs(best_structural),
+                              std::abs(second_structural), 1e-12});
+                if (structural_gap >= kStructuralTieBreakRatio)
+                  return objective_ties.front();
+
+                return *std::max_element(
+                    objective_ties.begin(), objective_ties.end(),
+                    [&](std::size_t a, std::size_t b) {
+                      const double a_conf =
+                          finalists[a].confidence.total_confidence;
+                      const double b_conf =
+                          finalists[b].confidence.total_confidence;
+                      if (std::abs(a_conf - b_conf) > 1e-4)
+                        return a_conf < b_conf;
+                      if (finalists[a].objective != finalists[b].objective)
+                        return finalists[a].objective > finalists[b].objective;
+                      return a > b;
+                    });
+              };
+
+          // Build the complete order by repeatedly applying the same staged
+          // decision.  Unlike a pairwise threshold comparator, this is a strict,
+          // deterministic procedure even when three near-tied candidates form
+          // a non-transitive comparison cycle.
+          std::vector<std::size_t> finalist_rank_order;
+          std::vector<std::size_t> remaining(finalists.size());
+          std::iota(remaining.begin(), remaining.end(), 0);
+          while (!remaining.empty()) {
+            const std::size_t winner = choose_finalist(remaining);
+            finalist_rank_order.push_back(winner);
+            remaining.erase(
+                std::find(remaining.begin(), remaining.end(), winner));
+          }
+
+          const auto &first_finalist = finalists[finalist_rank_order.front()];
+          selected = first_finalist.result_index;
+          double conf_margin = 1.0;
+          bool finalist_ambiguous = false;
+          int separated_second_idx = -1;
+
+          const double first_yaw =
+              results[first_finalist.result_index]
+                  .metrics.selected_multistart_yaw_deg;
+
+          for (std::size_t rank = 1; rank < finalist_rank_order.size(); ++rank) {
+            const auto &cand_finalist = finalists[finalist_rank_order[rank]];
+            const double cand_yaw =
+                results[cand_finalist.result_index]
+                    .metrics.selected_multistart_yaw_deg;
+            if (circularYawDistanceDeg(first_yaw, cand_yaw) >
+                kFinalistSeparationAngleDeg) {
+              separated_second_idx =
+                  static_cast<int>(cand_finalist.result_index);
+              conf_margin = first_finalist.confidence.total_confidence -
+                            cand_finalist.confidence.total_confidence;
+              if (std::isfinite(first_finalist.objective) &&
+                  std::isfinite(cand_finalist.objective)) {
+                finalist_objective_margin =
+                    (cand_finalist.objective - first_finalist.objective) /
+                    std::max(std::abs(cand_finalist.objective), 1e-12);
+              } else {
+                finalist_objective_margin =
+                    std::isfinite(first_finalist.objective) ? 1.0 : -1.0;
+              }
+              break;
+            }
+          }
+
+          if (separated_second_idx >= 0) {
+            results[selected].metrics.finalist_confidence_margin = conf_margin;
+            const auto &first_metrics = results[selected].metrics;
+            const auto &second_metrics =
+                results[separated_second_idx].metrics;
+
+            const bool second_is_viable =
+                results[separated_second_idx].success ||
+                conf_margin < 0.10;
+
+            const bool ranking_margins_insufficient =
+                finalist_objective_margin <
+                    config.minimum_multistart_objective_margin &&
+                conf_margin < config.minimum_finalist_confidence_margin;
+            const bool support_inferior =
+                second_is_viable &&
+                ((first_metrics.visible_edge_points <
+                  0.6 * second_metrics.visible_edge_points) ||
+                 (first_metrics.nid_projected_points <
+                  0.6 * second_metrics.nid_projected_points));
+
+            if (ranking_margins_insufficient || support_inferior) {
+              finalist_ambiguous = true;
+              results[selected].success = false;
+              results[selected].internal_gate_pass = false;
+              results[selected].state = "INTERNAL_GATE_FAIL";
+              results[selected].reason_code = "FINALIST_AMBIGUOUS";
+            }
+          } else {
+            results[selected].metrics.finalist_confidence_margin = 1.0;
+          }
+
+          if (results[selected].success &&
+              !results[selected].metrics.absolute_support_pass) {
+            results[selected].success = false;
+            results[selected].internal_gate_pass = false;
+            results[selected].state = "INTERNAL_GATE_FAIL";
+            results[selected].reason_code = "ABSOLUTE_SUPPORT_INSUFFICIENT";
+          }
+
           search_stages.push_back(
               {{"stage", "ceres_final_selection"},
                {"candidate_count", finalists.size()},
                {"selected_candidate", selected},
                {"selection",
-                "training_scene_validation_then_internal_gate_then_objective"},
+                "training_scene_validation_then_internal_gate_then_absolute_"
+                "support_then_significant_objective_gap_else_TESL_then_"
+                "multi_criteria_confidence"},
+               {"selected_confidence_score",
+                first_finalist.confidence.total_confidence},
+               {"finalist_objective_margin", finalist_objective_margin},
+               {"finalist_confidence_margin", conf_margin},
+               {"finalist_ambiguous", finalist_ambiguous},
                {"minimum_yaw_separation_deg", kMinimumDistinctStagedYawDeg}});
         }
       } else {
@@ -2931,10 +3407,12 @@ int main(int argc, char **argv) {
       observation.camera = display_camera;
     const auto training_scene_metrics =
         auto_calib::evaluateCalibrationPoseScenes(
-            training_validation_observations, display_transform, config);
+            training_validation_observations, display_transform, config,
+            &priors[selected]);
     const auto holdout_scene_metrics =
         auto_calib::evaluateCalibrationPoseScenes(
-            holdout_validation_observations, display_transform, config);
+            holdout_validation_observations, display_transform, config,
+            &priors[selected]);
     const nlohmann::json training_scene_validation =
         writePoseSceneValidation(
             training_scene_metrics, config, minimum_scene_direction_groups,
@@ -2946,6 +3424,181 @@ int main(int argc, char **argv) {
                   holdout_scene_metrics, config,
                   minimum_scene_direction_groups,
                   output_dir / "holdout_scene_validation.csv");
+    nlohmann::json finalist_holdout_validation = nlohmann::json::array();
+    bool finalist_holdout_distinctive = true;
+    std::size_t passing_separated_holdout_competitors = 0;
+    std::size_t ambiguous_separated_holdout_competitors = 0;
+    double selected_holdout_objective =
+        std::numeric_limits<double>::infinity();
+    double minimum_separated_holdout_objective_margin = 1.0;
+    const double selected_holdout_pass_ratio =
+        holdout_scene_metrics.empty()
+            ? 0.0
+            : holdout_scene_validation.at("pass_ratio").get<double>();
+    const double selected_yaw =
+        results[selected].metrics.selected_multistart_yaw_deg;
+
+    struct FinalistHoldoutRecord {
+      StagedFinalistRecord finalist;
+      std::vector<auto_calib::PoseSceneMetrics> metrics;
+      nlohmann::json validation;
+      auto_calib::PoseObjectiveMetrics objective;
+      double pass_ratio = 0.0;
+      double yaw = 0.0;
+      double yaw_distance = 0.0;
+      bool separated = false;
+      bool viable = false;
+    };
+    std::vector<FinalistHoldoutRecord> holdout_records;
+    holdout_records.reserve(staged_finalists.size());
+    for (const auto &finalist : staged_finalists) {
+      const auto &candidate = results[finalist.result_index];
+      const auto &candidate_transform =
+          candidate.success ? candidate.estimated_t_camera_lidar
+                            : candidate.candidate_t_camera_lidar;
+      const auto &candidate_camera =
+          candidate.success ? candidate.estimated_camera
+                            : candidate.candidate_camera;
+      auto candidate_holdout_observations = holdout_observations;
+      for (auto &observation : candidate_holdout_observations)
+        observation.camera = candidate_camera;
+      const auto candidate_metrics =
+          finalist.result_index == selected
+              ? holdout_scene_metrics
+              : auto_calib::evaluateCalibrationPoseScenes(
+                    candidate_holdout_observations, candidate_transform,
+                    config, &priors[finalist.result_index]);
+      const fs::path validation_path =
+          output_dir /
+          ("finalist_holdout_candidate_" +
+           std::to_string(finalist.result_index) + ".csv");
+      const nlohmann::json validation =
+          candidate_metrics.empty()
+              ? nlohmann::json(nullptr)
+              : writePoseSceneValidation(
+                    candidate_metrics, config,
+                    minimum_scene_direction_groups, validation_path);
+      const double pass_ratio =
+          candidate_metrics.empty()
+              ? 0.0
+              : validation.at("pass_ratio").get<double>();
+      const double yaw = candidate.metrics.selected_multistart_yaw_deg;
+      const double yaw_distance =
+          std::isfinite(selected_yaw) && std::isfinite(yaw)
+              ? circularYawDistanceDeg(selected_yaw, yaw)
+              : 0.0;
+      const bool separated =
+          finalist.result_index != selected &&
+          yaw_distance > kFinalistSeparationAngleDeg;
+      const bool viable =
+          candidate.internal_gate_pass &&
+          candidate.metrics.absolute_support_pass &&
+          finalist.training_pass_ratio >= minimum_scene_pass_ratio;
+      holdout_records.push_back(
+          {finalist, candidate_metrics, validation, {}, pass_ratio, yaw,
+           yaw_distance, separated, viable});
+    }
+
+    std::size_t holdout_reference_visible_edges = 0;
+    std::size_t holdout_reference_nid_points = 0;
+    std::size_t holdout_reference_edge_cells = 0;
+    for (const auto &record : holdout_records) {
+      std::size_t visible_edges = 0;
+      std::size_t nid_points = 0;
+      std::size_t edge_cells = 0;
+      for (const auto &scene : record.metrics) {
+        visible_edges += scene.visible_edge_points;
+        nid_points += scene.nid_projected_points;
+        edge_cells += scene.edge_active_spatial_cells;
+      }
+      holdout_reference_visible_edges =
+          std::max(holdout_reference_visible_edges, visible_edges);
+      holdout_reference_nid_points =
+          std::max(holdout_reference_nid_points, nid_points);
+      holdout_reference_edge_cells =
+          std::max(holdout_reference_edge_cells, edge_cells);
+    }
+    for (auto &record : holdout_records) {
+      const auto &candidate = results[record.finalist.result_index];
+      const auto &candidate_transform =
+          candidate.success ? candidate.estimated_t_camera_lidar
+                            : candidate.candidate_t_camera_lidar;
+      record.objective = auto_calib::summarizeCalibrationPoseScenes(
+          record.metrics, candidate_transform, config,
+          holdout_reference_visible_edges, holdout_reference_nid_points,
+          holdout_reference_edge_cells);
+      if (record.finalist.result_index == selected)
+        selected_holdout_objective = record.objective.composite_objective;
+    }
+    const auto objective_margin_from_selected = [&](double competitor) {
+      if (!std::isfinite(selected_holdout_objective) ||
+          !std::isfinite(competitor))
+        return std::isfinite(selected_holdout_objective) ? 1.0 : -1.0;
+      return (competitor - selected_holdout_objective) /
+             std::max(std::abs(competitor), 1e-12);
+    };
+    for (const auto &record : holdout_records) {
+      const auto &candidate = results[record.finalist.result_index];
+      const bool passes_as_well_as_selected =
+          selected_holdout_pass_ratio >= 1.0 && !record.metrics.empty() &&
+          record.pass_ratio + 1e-12 >= selected_holdout_pass_ratio;
+      const double objective_margin =
+          record.finalist.result_index == selected
+              ? 0.0
+              : objective_margin_from_selected(
+                    record.objective.composite_objective);
+      const bool objective_margin_sufficient =
+          record.finalist.result_index == selected ||
+          objective_margin >= config.minimum_multistart_objective_margin;
+      const bool ambiguous_competitor =
+          record.separated && record.viable && passes_as_well_as_selected &&
+          !objective_margin_sufficient;
+      if (record.separated && record.viable && passes_as_well_as_selected) {
+        ++passing_separated_holdout_competitors;
+        minimum_separated_holdout_objective_margin =
+            std::min(minimum_separated_holdout_objective_margin,
+                     objective_margin);
+      }
+      if (ambiguous_competitor) {
+        finalist_holdout_distinctive = false;
+        ++ambiguous_separated_holdout_competitors;
+      }
+      finalist_holdout_validation.push_back(
+          {{"candidate_index", record.finalist.result_index},
+           {"selected", record.finalist.result_index == selected},
+           {"yaw_deg", record.yaw},
+           {"yaw_distance_from_selected_deg", record.yaw_distance},
+           {"separated_from_selected", record.separated},
+           {"training_pass_ratio", record.finalist.training_pass_ratio},
+           {"internal_gate_pass", candidate.internal_gate_pass},
+           {"absolute_support_pass", candidate.metrics.absolute_support_pass},
+           {"viable_competitor", record.viable},
+           {"holdout_pass_ratio", record.pass_ratio},
+           {"holdout_objective", record.objective.composite_objective},
+           {"holdout_objective_margin_from_selected", objective_margin},
+           {"minimum_required_objective_margin",
+            config.minimum_multistart_objective_margin},
+           {"objective_margin_sufficient", objective_margin_sufficient},
+           {"ambiguous_competitor", ambiguous_competitor},
+           {"objective_components",
+            {{"edge", record.objective.edge_objective},
+             {"geometry_nid", record.objective.geometry_nid_objective},
+             {"signal_nmi", record.objective.signal_nmi_objective},
+             {"structural", record.objective.structural_objective},
+             {"manhattan", record.objective.manhattan_objective},
+             {"direction_prior",
+              record.objective.direction_prior_objective},
+             {"coverage", record.objective.coverage_objective}}},
+           {"coverage",
+            {{"visible_edges", record.objective.visible_edge_points},
+             {"nid_points", record.objective.nid_projected_points},
+             {"edge_cells", record.objective.edge_active_spatial_cells},
+             {"edge_ratio", record.objective.edge_coverage_ratio},
+             {"nid_ratio", record.objective.nid_coverage_ratio},
+             {"edge_cell_ratio",
+              record.objective.edge_spatial_coverage_ratio}}},
+           {"validation", record.validation}});
+    }
     if (final_success &&
         training_scene_validation.at("pass_ratio").get<double>() <
             minimum_scene_pass_ratio) {
@@ -2956,6 +3609,9 @@ int main(int argc, char **argv) {
                    1.0) {
       final_success = false;
       final_reason = "HOLDOUT_VALIDATION_FAILED";
+    } else if (final_success && !finalist_holdout_distinctive) {
+      final_success = false;
+      final_reason = "FINALIST_HOLDOUT_AMBIGUOUS";
     }
     const bool core_internal_gate_pass =
         !diagnostic_only && results[selected].internal_gate_pass;
@@ -2969,7 +3625,29 @@ int main(int argc, char **argv) {
     const bool candidate_rt_status = core_internal_gate_pass &&
                                      training_validation_pass &&
                                      holdout_available &&
-                                     holdout_validation_pass;
+                                     holdout_validation_pass &&
+                                     finalist_holdout_distinctive;
+    search_stages.push_back(
+        {{"stage", "finalist_holdout_validation"},
+         {"candidate_count", staged_finalists.size()},
+         {"selected_holdout_pass_ratio", selected_holdout_pass_ratio},
+         {"passing_separated_competitors",
+          passing_separated_holdout_competitors},
+         {"ambiguous_separated_competitors",
+          ambiguous_separated_holdout_competitors},
+         {"selected_holdout_objective", selected_holdout_objective},
+         {"minimum_separated_holdout_objective_margin",
+          minimum_separated_holdout_objective_margin},
+         {"minimum_required_objective_margin",
+          config.minimum_multistart_objective_margin},
+         {"common_coverage_reference",
+          {{"visible_edges", holdout_reference_visible_edges},
+           {"nid_points", holdout_reference_nid_points},
+           {"edge_cells", holdout_reference_edge_cells}}},
+         {"distinctive", finalist_holdout_distinctive},
+         {"selection_policy",
+          "pass_ratio_tier_then_training_composite_objective_with_common_"
+          "holdout_coverage_reference_and_minimum_margin"}});
     // Product activation needs independent references, repeated runs and
     // fail-safe evidence.  This executable deliberately does not infer that
     // evidence from the calibration input, so approval remains explicit.
@@ -3193,12 +3871,25 @@ int main(int argc, char **argv) {
         {"internal_gate_status",
          core_internal_gate_pass ? "INTERNAL_GATE_PASS" : "INTERNAL_GATE_FAIL"},
         {"candidate_rt_status", candidate_rt_status ? "CANDIDATE_RT" : "NOT_CANDIDATE_RT"},
+        {"finalist_confidence_margin", results[selected].metrics.finalist_confidence_margin},
+        {"finalist_objective_margin", finalist_objective_margin},
+        {"absolute_support_pass", results[selected].metrics.absolute_support_pass},
+        {"global_max_visible_edges", global_max_visible_edges},
+        {"global_max_nid_points", global_max_nid_points},
         {"product_approved_rt_status",
          product_approved_rt_status ? "PRODUCT_APPROVED_RT"
                                      : "NOT_PRODUCT_APPROVED_RT"},
         {"activation_allowed", product_approved_rt_status},
         {"training_validation_pass", training_validation_pass},
         {"holdout_validation_pass", holdout_validation_pass},
+        {"finalist_holdout_distinctive", finalist_holdout_distinctive},
+        {"passing_separated_holdout_competitors",
+         passing_separated_holdout_competitors},
+        {"ambiguous_separated_holdout_competitors",
+         ambiguous_separated_holdout_competitors},
+        {"selected_holdout_objective", selected_holdout_objective},
+        {"minimum_separated_holdout_objective_margin",
+         minimum_separated_holdout_objective_margin},
         {"independent_product_approval_evidence",
          "required_outside_this_single_calibration_run"},
         {"reason_code", final_reason},
@@ -3307,9 +3998,9 @@ int main(int argc, char **argv) {
            "visible_edge>=100, nid_projected>=100 per observation, and "
            "configured structural direction support"},
           {"relative_coverage_policy",
-           "edge support is a soft penalty; NID/spatial support are hard "
-           "gates relative to the best yaw candidate in the same down-roll "
-           "layer"},
+           "edge support is a soft penalty; NID relative support is a hard "
+           "gate only inside each staged local yaw window and a soft global "
+           "finalist score; spatial support remains a hard gate"},
           {"minimum_relative_nid_coverage",
            config.minimum_relative_nid_coverage},
           {"minimum_relative_edge_spatial_coverage",
@@ -3340,6 +4031,9 @@ int main(int argc, char **argv) {
           {"structural_line_weight", config.structural_line_weight},
           {"manhattan_direction_feature",
            "LSD_vanishing_directions_plus_lidar_gravity_and_wall_axes"},
+          {"manhattan_image_feature_prior_policy",
+           "fixed_per_finalist_training_seed_prior_reused_for_training_and_"
+           "holdout"},
           {"maximum_manhattan_vanishing_directions",
            config.maximum_manhattan_vanishing_directions},
           {"manhattan_direction_weight",
@@ -3374,7 +4068,12 @@ int main(int argc, char **argv) {
                ? nlohmann::json(value(args, "--yaw-max-deg", 180.0))
                : nlohmann::json(180.0 - yaw_step_deg)},
           {"yaw_neighbor_topology", circular_yaw ? "circular" : "bounded"},
-          {"ambiguity_margin", config.minimum_multistart_objective_margin}}},
+          {"ambiguity_margin", config.minimum_multistart_objective_margin},
+          {"minimum_finalist_confidence_margin",
+           config.minimum_finalist_confidence_margin},
+          {"finalist_objective_margin", finalist_objective_margin},
+          {"finalist_confidence_margin",
+           results[selected].metrics.finalist_confidence_margin}}},
         {"pairs", pairs},
         {"input_pair_start", pair_start},
         {"input_pair_count", pair_count},
@@ -3385,6 +4084,7 @@ int main(int argc, char **argv) {
          minimum_scene_direction_groups},
         {"training_scene_validation", training_scene_validation},
         {"holdout_scene_validation", holdout_scene_validation},
+        {"finalist_holdout_validation", finalist_holdout_validation},
         {"baseline_m", explicit_camera_center ? nlohmann::json(nullptr)
                                               : nlohmann::json(baseline)},
         {"camera_center_lidar_m",
@@ -3419,7 +4119,8 @@ int main(int argc, char **argv) {
         {"selected_candidate_policy",
          staged_search
              ? "top3_distinct_yaw_contiguous_basins_then_5deg_then_1deg_"
-               "then_up_to_3_ceres_training_scene_selection; no_fallback"
+               "then_up_to_3_ceres_significant_objective_else_TESL_training_"
+               "scene_selection; no_fallback"
              : "legacy_contiguous_basin; no_fallback"},
         {"selected_candidate_structural_direction_groups",
          structuralDirectionGroups(results[selected])},

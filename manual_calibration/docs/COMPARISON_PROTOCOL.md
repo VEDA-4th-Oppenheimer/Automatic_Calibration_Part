@@ -4,6 +4,13 @@
 - 수정 이력:
   - 2026-07-31 — Galaxy Tab S7 전체 화면 ChArUco를 기본 현장 매체로 변경
   - 2026-07-30 — LiDAR 없는 2D ChArUco Manual Calibration으로 전면 재설계
+  - 2026-08-14 — session-const-env 태블릿 display geometry 예비 RT의 비교 제한 추가
+
+> 수동 RT 기준값을 새로 취득하거나 다른 세션에서 작업을 이어받을 때는
+> MANUAL_RT_REFERENCE_WORKFLOW.md를 먼저 따른다.
+
+> session-const-env의 실제 계산값과 입력/잔차는
+> [`SESSION_CONST_ENV_CALIBRATION_RECORD.md`](SESSION_CONST_ENV_CALIBRATION_RECORD.md)를 따른다.
 
 ## 1. 항상 비교 가능한 항목
 
@@ -37,6 +44,11 @@ Marker image만으로는 `T_camera_marker_board`만 구할 수 있다. Automatic
 5. Reference uncertainty를 결과에 함께 기록
 
 조건을 만족하지 않으면 6-DoF 차이는 보고하지 않는다.
+
+태블릿 display plane과 `display_spec`/`board_config`를 조합한
+`ESTIMATED_GEOMETRY_CORRECTED` 결과는 위 독립 조건을 충족하기 전까지 진단용으로만
+표시한다. 이 값을 Automatic 결과에서 역산하거나 absolute ground truth로 승격하지
+않는다.
 
 ## 3. 권장 반복시험
 

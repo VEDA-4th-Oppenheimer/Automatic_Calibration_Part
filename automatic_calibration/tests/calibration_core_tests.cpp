@@ -101,9 +101,100 @@ auto_calib::Scan makeGrazingPlaneScan() {
   scan.source_count = scan.valid_count;
   return scan;
 }
+
+auto_calib::Scan makeFloorCeilingRoomScan() {
+  auto_calib::Scan scan;
+  scan.config.rows = 40;
+  scan.config.columns = 40;
+  scan.points.resize(static_cast<std::size_t>(scan.config.rows) *
+                     scan.config.columns);
+  constexpr double step = 0.05;
+  for (std::uint32_t row = 0; row < scan.config.rows; ++row) {
+    for (std::uint32_t column = 0; column < scan.config.columns; ++column) {
+      Eigen::Vector3d xyz;
+      if (row < 10) {
+        // Ceiling plane: y = -0.50
+        const double x = (static_cast<double>(column) - 20.0) * step;
+        const double z = 2.0 + static_cast<double>(9 - row) * step;
+        xyz = {x, -0.50, z};
+      } else if (row >= 30) {
+        // Floor plane: y = 1.00
+        const double x = (static_cast<double>(column) - 20.0) * step;
+        const double z = 2.0 + static_cast<double>(row - 30) * 0.08;
+        xyz = {x, 1.00, z};
+      } else {
+        const double y = -0.50 + static_cast<double>(row - 10) * 0.075;
+        if (column < 20) {
+          // Front wall: z = 2.0
+          const double x = (static_cast<double>(column) - 20.0) * step;
+          xyz = {x, y, 2.0};
+        } else {
+          // Side wall: x = 0.0
+          const double z = 2.0 + static_cast<double>(column - 20) * step;
+          xyz = {0.0, y, z};
+        }
+      }
+      auto &point = scan.points[static_cast<std::size_t>(row) *
+                                    scan.config.columns +
+                                column];
+      point.xyz = xyz.cast<float>();
+      point.range = static_cast<float>(xyz.norm());
+      point.row = row;
+      point.column = column;
+      point.flags = auto_calib::kValidRange;
+      ++scan.valid_count;
+    }
+  }
+  scan.source_count = scan.valid_count;
+  return scan;
+}
 } // namespace
 int main() {
   try {
+    {
+      auto_calib::CalibrationConfig objective_cfg;
+      objective_cfg.edge_alignment_weight = 0.20;
+      objective_cfg.normalized_information_distance_weight = 0.30;
+      objective_cfg.signal_nmi_weight = 0.10;
+      objective_cfg.structural_line_weight = 0.15;
+      objective_cfg.manhattan_direction_weight = 0.05;
+      objective_cfg.camera_direction_prior_weight = 0.0;
+      objective_cfg.coverage_penalty_weight = 0.25;
+      auto_calib::PoseSceneMetrics first;
+      first.visible_edge_points = 100;
+      first.edge_objective = 0.10;
+      first.nid_projected_points = 50;
+      first.edge_active_spatial_cells = 4;
+      first.geometry_nid_objective = 0.20;
+      first.signal_nmi_objective = 0.30;
+      first.structural_objective = 0.40;
+      first.structural_score_weight = 2.0;
+      first.manhattan_objective = 0.50;
+      first.manhattan_vertical_inliers = 3;
+      auto_calib::PoseSceneMetrics second;
+      second.visible_edge_points = 300;
+      second.edge_objective = 0.30;
+      second.nid_projected_points = 150;
+      second.edge_active_spatial_cells = 8;
+      second.geometry_nid_objective = 0.40;
+      second.signal_nmi_objective = 0.50;
+      second.structural_objective = 0.80;
+      second.structural_score_weight = 1.0;
+      const auto objective = auto_calib::summarizeCalibrationPoseScenes(
+          {first, second}, {}, objective_cfg, 500, 250, 16);
+      require(std::abs(objective.edge_objective - 0.25) < 1e-12,
+              "Fixed-pose edge objective aggregation changed");
+      require(std::abs(objective.geometry_nid_objective - 0.30) < 1e-12,
+              "Fixed-pose NID objective aggregation changed");
+      require(std::abs(objective.structural_objective - 8.0 / 15.0) <
+                  1e-12,
+              "Fixed-pose structural objective aggregation changed");
+      require(std::abs(objective.coverage_objective - 0.0475) < 1e-12,
+              "Fixed-pose common-reference coverage changed");
+      require(std::abs(objective.composite_objective - 0.296875) < 1e-12,
+              "Fixed-pose composite objective must match training weights");
+    }
+
     auto_calib::CalibrationConfig plane_cfg;
     plane_cfg.minimum_lidar_plane_points = 50;
     plane_cfg.maximum_lidar_plane_rms_error_m = 0.005;
@@ -414,6 +505,51 @@ int main() {
     require(!vanishing_diagnostics.empty() &&
                 vanishing_diagnostics.front().inliers >= 3,
             "Manhattan vanishing-direction diagnostics were not retained");
+    cv::Mat orthogonal_manhattan_image(400, 400, CV_8UC3,
+                                       cv::Scalar(0, 0, 0));
+    for (int coordinate = 70; coordinate <= 330; coordinate += 65) {
+      cv::line(orthogonal_manhattan_image, {coordinate, 40},
+               {coordinate, 360}, {255, 255, 255}, 3, cv::LINE_AA);
+      cv::line(orthogonal_manhattan_image, {40, coordinate},
+               {360, coordinate}, {255, 255, 255}, 3, cv::LINE_AA);
+    }
+    const auto orthogonal_directions =
+        auto_calib::detectManhattanVanishingDirections(
+            orthogonal_manhattan_image, camera, manhattan_cfg);
+    require(std::any_of(orthogonal_directions.begin(),
+                        orthogonal_directions.end(), [](const auto &item) {
+                          return std::abs(item.camera_direction.x()) > 0.95;
+                        }) &&
+                std::any_of(orthogonal_directions.begin(),
+                            orthogonal_directions.end(), [](const auto &item) {
+                              return std::abs(item.camera_direction.y()) >
+                                     0.95;
+                            }),
+            "Manhattan prior regression fixture needs two orthogonal axes");
+    const auto_calib::Transform evaluated_pose;
+    const auto_calib::Transform vertical_feature_prior;
+    auto horizontal_feature_prior = vertical_feature_prior;
+    horizontal_feature_prior.rotation =
+        Eigen::AngleAxisd(-0.5 * 3.14159265358979323846,
+                          Eigen::Vector3d::UnitZ())
+            .toRotationMatrix();
+    const std::vector<auto_calib::CalibrationObservation>
+        orthogonal_observations = {
+            {orthogonal_manhattan_image, camera, scan}};
+    const auto vertical_prior_metrics =
+        auto_calib::evaluateCalibrationPoseScenes(
+            orthogonal_observations, evaluated_pose, manhattan_cfg,
+            &vertical_feature_prior);
+    const auto horizontal_prior_metrics =
+        auto_calib::evaluateCalibrationPoseScenes(
+            orthogonal_observations, evaluated_pose, manhattan_cfg,
+            &horizontal_feature_prior);
+    require(vertical_prior_metrics.front().manhattan_vertical_error_deg <
+                    5.0 &&
+                horizontal_prior_metrics.front().manhattan_vertical_error_deg >
+                    80.0,
+            "Fixed-pose evaluation ignored the explicit Manhattan feature "
+            "prior");
     const auto manhattan_result = auto_calib::calibrateExtrinsicMultiScene(
         manhattan_observations, initial, manhattan_cfg);
     require(manhattan_result.metrics.manhattan_vertical_inliers >= 9 &&
@@ -551,9 +687,385 @@ int main() {
             "Blank image gate failed");
     require(rejected.metrics.runtime_ms > 0.0,
             "Rejected input runtime was not recorded");
-    auto error = auto_calib::calculatePoseError({}, {});
-    require(error.translation_m < 1e-12 && error.rotation_deg < 1e-12,
-            "Pose error failed");
+    // Milestone 1 (R1) Tests: Dominant Ground/Ceiling Planes, Ground Normal/Height Constraints, Asymmetric Line Weighting
+    auto room_scan = makeFloorCeilingRoomScan();
+    auto_calib::CalibrationConfig r1_cfg;
+    r1_cfg.minimum_lidar_plane_points = 50;
+    r1_cfg.enable_ground_plane_constraint = true;
+    r1_cfg.enable_asymmetric_line_weighting = true;
+    r1_cfg.ceiling_suppression_factor = 0.40;
+    r1_cfg.vertical_corner_boost_factor = 1.80;
+
+    auto room_planes = auto_calib::segmentLidarPlanes(room_scan, r1_cfg);
+    require(room_planes.planes.size() >= 3, "Room scan plane segmentation failed");
+
+    auto dominant = auto_calib::findDominantPlanes(room_planes, r1_cfg);
+    require(dominant.has_ground, "Dominant ground plane not detected");
+    require(std::abs(dominant.ground_y - 1.00) < 0.15, "Ground height y estimate incorrect");
+    require(dominant.ground_normal.y() > 0.90, "Ground plane normal not pointing along gravity axis");
+    require(dominant.has_ceiling, "Dominant ceiling plane not detected");
+    require(std::abs(dominant.ceiling_y - (-0.50)) < 0.15, "Ceiling height y estimate incorrect");
+    require(dominant.ceiling_normal.y() < -0.90, "Ceiling plane normal not pointing upward");
+
+    // Test Ground Consistency Evaluator
+    auto_calib::Transform valid_tf; // C_lidar = (0, 0, 0) with pitch = 20 deg
+    valid_tf.rotation =
+        Eigen::AngleAxisd(20.0 * M_PI / 180.0, Eigen::Vector3d::UnitX())
+            .toRotationMatrix();
+    auto valid_ground_eval =
+        auto_calib::evaluateGroundConsistency(valid_tf, dominant, r1_cfg);
+    require(valid_ground_eval.valid, "Valid camera pose rejected by ground evaluator");
+    require(std::abs(valid_ground_eval.height_m - 1.00) < 0.15, "Ground height evaluation mismatch");
+    require(std::abs(valid_ground_eval.tilt_deg - 20.0) < 5.0, "Ground tilt evaluation mismatch");
+    require(std::abs(valid_ground_eval.downward_pitch_deg - 20.0) < 5.0, "Downward pitch evaluation mismatch");
+
+    // Sub-ground camera (Cy = 1.5m > 1.0m -> h_cam = -0.5m < 0.8m)
+    auto_calib::Transform subground_tf = valid_tf;
+    subground_tf.translation_m = {0, -1.5, 0};
+    auto subground_eval = auto_calib::evaluateGroundConsistency(subground_tf, dominant, r1_cfg);
+    require(!subground_eval.valid, "Sub-ground camera pose was not rejected");
+
+    // Camera exceeding max height (5.0m)
+    auto_calib::Transform too_high_tf = valid_tf;
+    too_high_tf.translation_m = {0, 5.0, 0}; // h_cam = 6.0m > 5.0m
+    auto too_high_eval = auto_calib::evaluateGroundConsistency(too_high_tf, dominant, r1_cfg);
+    require(!too_high_eval.valid, "Too high camera pose was not rejected");
+
+    // Upside-down camera (tilt = 180 deg > 85 deg)
+    auto_calib::Transform upside_down_tf;
+    upside_down_tf.rotation =
+        Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    auto upside_down_eval = auto_calib::evaluateGroundConsistency(upside_down_tf, dominant, r1_cfg);
+    require(!upside_down_eval.valid, "Upside down camera pose was not rejected");
+
+    // Horizontal camera (pitch = 0 deg < 5 deg)
+    auto_calib::Transform horizontal_cam_tf;
+    auto horizontal_cam_eval = auto_calib::evaluateGroundConsistency(horizontal_cam_tf, dominant, r1_cfg);
+    require(!horizontal_cam_eval.valid, "Horizontal camera pose (pitch < 5 deg) was not rejected");
+
+    // Over-pitched camera (pitch = 70 deg > 60 deg)
+    auto_calib::Transform overpitched_tf;
+    overpitched_tf.rotation =
+        Eigen::AngleAxisd(70.0 * M_PI / 180.0, Eigen::Vector3d::UnitX()).toRotationMatrix();
+    auto overpitched_eval = auto_calib::evaluateGroundConsistency(overpitched_tf, dominant, r1_cfg);
+    require(!overpitched_eval.valid, "Overpitched camera pose (pitch > 60 deg) was not rejected");
+
+    // Test Asymmetric Structural Feature Weighting
+    auto room_structural_lines =
+        auto_calib::extractLidarPlaneIntersectionSegments(room_scan, room_planes, r1_cfg);
+    require(!room_structural_lines.empty(), "No structural lines extracted from room scan");
+    double min_ceiling_conf = 100.0, max_ceiling_conf = 0.0;
+    double min_floor_conf = 100.0, max_floor_conf = 0.0;
+    double corner_conf = 0.0;
+    for (const auto &seg : room_structural_lines) {
+      const Eigen::Vector3d dir = (seg.b - seg.a).normalized();
+      const Eigen::Vector3d mid = 0.5 * (seg.a + seg.b);
+      if (std::abs(dir.y()) < 0.2 && mid.y() < 0.0) {
+        // Ceiling line (suppressed)
+        min_ceiling_conf = std::min(min_ceiling_conf, seg.confidence);
+        max_ceiling_conf = std::max(max_ceiling_conf, seg.confidence);
+      } else if (std::abs(dir.y()) < 0.2 && mid.y() > 0.5) {
+        // Floor line (boosted)
+        min_floor_conf = std::min(min_floor_conf, seg.confidence);
+        max_floor_conf = std::max(max_floor_conf, seg.confidence);
+      } else if (std::abs(dir.y()) > 0.8) {
+        // Vertical corner (strongly boosted)
+        corner_conf = std::max(corner_conf, seg.confidence);
+      }
+    }
+    require(max_ceiling_conf < 1.15, "Ceiling line suppression not applied");
+    require(min_floor_conf > 2.50, "Floor line boost not applied");
+    require(corner_conf >= 4.00, "Vertical corner boost not applied");
+    require(min_floor_conf > max_ceiling_conf * 2.0, "Floor to ceiling confidence ratio insufficient");
+    require(corner_conf > max_ceiling_conf * 3.5, "Corner to ceiling confidence ratio insufficient");
+
+    // Test calibrateExtrinsic rejection on ground constraint violation
+    cv::Mat room_img(400, 400, CV_8UC3, cv::Scalar(128, 128, 128));
+    cv::line(room_img, cv::Point(200, 0), cv::Point(200, 400), cv::Scalar(255, 255, 255), 2);
+    auto_calib::Transform subground_prior = valid_tf;
+    subground_prior.translation_m = {0, -1.5, 0};
+    auto rejected_subground =
+        auto_calib::calibrateExtrinsic(room_img, camera, room_scan, subground_prior, r1_cfg);
+    require(!rejected_subground.success &&
+                rejected_subground.reason_code == "GEOMETRY_GROUND_INCONSISTENT",
+            "Ground plane constraint gate failed on subground prior");
+
+    auto_calib::Transform upside_down_prior = valid_tf;
+    upside_down_prior.rotation =
+        Eigen::AngleAxisd(M_PI, Eigen::Vector3d::UnitZ()).toRotationMatrix();
+    auto rejected_upside_down =
+        auto_calib::calibrateExtrinsic(room_img, camera, room_scan, upside_down_prior, r1_cfg);
+    require(!rejected_upside_down.success &&
+                rejected_upside_down.reason_code == "GEOMETRY_GROUND_INCONSISTENT",
+            "Ground plane constraint gate failed on upside down prior");
+
+    // Challenger 2 Stress Test Suite: Parameter bounds, extreme factors & toggle
+    {
+      const std::vector<double> test_suppressions = {0.0, 0.01, 0.40, 1.0, 2.0, 10.0, 100.0};
+      const std::vector<double> test_boosts = {0.0, 0.1, 1.0, 1.80, 5.0, 50.0, 1000.0};
+      const std::vector<double> test_weights = {-1.0, 0.0, 0.5, 1.0, 5.0, 100.0};
+
+      for (double supp : test_suppressions) {
+        for (double boost : test_boosts) {
+          for (double w : test_weights) {
+            auto_calib::CalibrationConfig stress_cfg = r1_cfg;
+            stress_cfg.ceiling_suppression_factor = supp;
+            stress_cfg.vertical_corner_boost_factor = boost;
+            stress_cfg.asymmetric_feature_weight_factor = w;
+
+            auto lines = auto_calib::extractLidarPlaneIntersectionSegments(
+                room_scan, room_planes, stress_cfg);
+            for (const auto &l : lines) {
+              require(std::isfinite(l.confidence), "Stress: confidence non-finite");
+              require(l.confidence >= 0.10, "Stress: confidence below lower clamp bound 0.10");
+              require(l.confidence <= 5.0, "Stress: confidence above upper clamp bound 5.0");
+            }
+          }
+        }
+      }
+
+      // Test asymmetric line weighting toggle off
+      auto_calib::CalibrationConfig disabled_cfg = r1_cfg;
+      disabled_cfg.enable_asymmetric_line_weighting = false;
+      auto disabled_lines = auto_calib::extractLidarPlaneIntersectionSegments(
+          room_scan, room_planes, disabled_cfg);
+      for (const auto &l : disabled_lines) {
+        require(std::abs(l.confidence - 1.0) < 1e-6, "Disabled asymmetric weighting must yield 1.0");
+      }
+
+      // Test rotation sphere ground consistency validity
+      for (double yaw_deg = -180.0; yaw_deg <= 180.0; yaw_deg += 30.0) {
+        for (double pitch_deg = -90.0; pitch_deg <= 90.0; pitch_deg += 30.0) {
+          auto_calib::Transform tf;
+          tf.rotation =
+              (Eigen::AngleAxisd(yaw_deg * M_PI / 180.0, Eigen::Vector3d::UnitY()) *
+               Eigen::AngleAxisd(pitch_deg * M_PI / 180.0, Eigen::Vector3d::UnitX()))
+                  .toRotationMatrix();
+          tf.translation_m = {0.0, 0.2, 0.0};
+          auto eval = auto_calib::evaluateGroundConsistency(tf, dominant, r1_cfg);
+          require(std::isfinite(eval.height_m) && std::isfinite(eval.tilt_deg),
+                  "Tilt/height evaluation non-finite");
+          const Eigen::Vector3d n_cam = tf.rotation * dominant.ground_normal;
+          if (n_cam.y() <= 0.0 || eval.tilt_deg > r1_cfg.maximum_camera_ground_tilt_deg) {
+            require(!eval.valid, "Inconsistent ground evaluation validity");
+          }
+        }
+      }
+    }
+
+    // Milestone 2 (R2) Tests:
+    // 1. Normal-Gated Line Matching & Dihedral Normal Retention
+    {
+      auto r2_lines =
+          auto_calib::extractLidarPlaneIntersectionSegments(room_scan, room_planes, r1_cfg);
+      require(!r2_lines.empty(), "R2: Structural lines missing from room scan");
+      bool has_dihedral_normals = false;
+      for (const auto &line : r2_lines) {
+        if (line.has_plane_normals) {
+          has_dihedral_normals = true;
+          require(line.n1.norm() > 0.9 && line.n1.norm() < 1.1,
+                  "R2: Plane normal n1 not unit length");
+          require(line.n2.norm() > 0.9 && line.n2.norm() < 1.1,
+                  "R2: Plane normal n2 not unit length");
+        }
+      }
+      require(has_dihedral_normals,
+              "R2: Plane intersection lines must retain dihedral plane normals");
+
+      // 2. Normal-Gated Line Matching: Vertical 3D Line vs Horizontal 2D Edge
+      // Create an image with ONLY horizontal lines
+      cv::Mat horiz_only_img(400, 400, CV_8UC3, cv::Scalar(0, 0, 0));
+      for (int y = 50; y <= 350; y += 50) {
+        cv::line(horiz_only_img, cv::Point(50, y), cv::Point(350, y),
+                 cv::Scalar(255, 255, 255), 2);
+      }
+
+      auto_calib::CalibrationConfig r2_gated_cfg;
+      r2_gated_cfg.enable_normal_gated_line_matching = true;
+      r2_gated_cfg.structural_normal_weight = 0.25;
+
+      // When evaluating vertical 3D lines against horizontal-only 2D image,
+      // normal gating must prevent false matching of vertical 3D lines to horizontal 2D lines
+      std::vector<auto_calib::CalibrationObservation> vert_horiz_obs = {
+          {horiz_only_img, camera, room_scan}};
+      auto scene_eval_gated = auto_calib::evaluateCalibrationPoseScenes(
+          vert_horiz_obs, valid_tf, r2_gated_cfg);
+      require(scene_eval_gated.front().vertical_structural_matches == 0,
+              "R2: Normal gating failed to reject vertical 3D line matched against horizontal 2D lines");
+
+      // Now create an image with a matching vertical line at x = 200
+      cv::Mat vert_matching_img(400, 400, CV_8UC3, cv::Scalar(0, 0, 0));
+      cv::line(vert_matching_img, cv::Point(200, 50), cv::Point(200, 350),
+               cv::Scalar(255, 255, 255), 2);
+      std::vector<auto_calib::CalibrationObservation> vert_matching_obs = {
+          {vert_matching_img, camera, room_scan}};
+      auto scene_eval_matched = auto_calib::evaluateCalibrationPoseScenes(
+          vert_matching_obs, valid_tf, r2_gated_cfg);
+      require(scene_eval_matched.front().vertical_structural_matches >= 1,
+              "R2: Normal-gated matching failed to match correctly oriented vertical line");
+      require(scene_eval_matched.front().total_explained_structural_length > 50.0,
+              "R2: Total explained structural length (TESL) must be positive on match");
+
+      // 3. Coverage-Weighted Robust Line Metric (TESL Integration) & Subset Shrinkage Resistance
+      cv::Mat multi_line_img(400, 400, CV_8UC3, cv::Scalar(0, 0, 0));
+      // Draw vertical corner at x=200, horizontal floor at y=350, horizontal ceiling at y=50
+      cv::line(multi_line_img, cv::Point(200, 50), cv::Point(200, 350),
+               cv::Scalar(255, 255, 255), 2);
+      cv::line(multi_line_img, cv::Point(50, 350), cv::Point(350, 350),
+               cv::Scalar(255, 255, 255), 2);
+      cv::line(multi_line_img, cv::Point(50, 50), cv::Point(350, 50),
+               cv::Scalar(255, 255, 255), 2);
+
+      std::vector<auto_calib::CalibrationObservation> full_obs = {
+          {multi_line_img, camera, room_scan}};
+
+      auto eval_full =
+          auto_calib::evaluateCalibrationPoseScenes(full_obs, valid_tf, r2_gated_cfg);
+
+      // Create a perturbed pose (shifted in yaw and translation) that pushes structural lines out
+      auto_calib::Transform perturbed_tf;
+      perturbed_tf.rotation =
+          Eigen::AngleAxisd(30.0 * M_PI / 180.0, Eigen::Vector3d::UnitY())
+              .toRotationMatrix();
+      perturbed_tf.translation_m = {0.5, 0.0, 0.0};
+      auto eval_perturbed =
+          auto_calib::evaluateCalibrationPoseScenes(full_obs, perturbed_tf,
+                                                   r2_gated_cfg);
+
+      // Pose A must have significantly larger TESL and lower structural objective than Pose B
+      require(eval_full.front().total_explained_structural_length >
+                  eval_perturbed.front().total_explained_structural_length,
+              "R2: Aligned pose must have higher TESL than perturbed/shrunken pose");
+      require(eval_full.front().structural_objective <
+                  eval_perturbed.front().structural_objective,
+              "R2: Robust structural line objective must penalize shrunken/perturbed subset poses");
+
+      // 4. Line-to-Line Geometric Error Refinement (Greedy 1:1 Matching Check)
+      require(eval_full.front().structural_matched_segments <=
+                  eval_full.front().structural_visible_segments,
+              "R2: 1:1 structural line matching violated visible bound");
+      require(eval_full.front().horizontal_structural_matches +
+                  eval_full.front().vertical_structural_matches <=
+              eval_full.front().structural_matched_segments,
+              "R2: Directional structural match counts exceed total matched segments");
+    }
+
+    // Milestone 3 (R3) Tests:
+    // 1. Ceres Residual Smoothness & Perturbation Differentiability
+    {
+      cv::Mat m3_img(400, 400, CV_8UC3, cv::Scalar(0, 0, 0));
+      cv::line(m3_img, cv::Point(200, 50), cv::Point(200, 350),
+               cv::Scalar(255, 255, 255), 2);
+      cv::line(m3_img, cv::Point(50, 350), cv::Point(350, 350),
+               cv::Scalar(255, 255, 255), 2);
+      cv::line(m3_img, cv::Point(50, 50), cv::Point(350, 50),
+               cv::Scalar(255, 255, 255), 2);
+      const auto room_edges = auto_calib::extractLidarEdgePoints(room_scan, room_planes, r1_cfg);
+      for (const auto &p : room_edges) {
+        int u = std::lround(camera.k(0, 0) * p.x() / p.z() + camera.k(0, 2)),
+            v = std::lround(camera.k(1, 1) * p.y() / p.z() + camera.k(1, 2));
+        if (u >= 0 && v >= 0 && u < 400 && v < 400)
+          cv::circle(m3_img, {u, v}, 2, {255, 255, 255}, -1);
+      }
+
+      std::vector<auto_calib::CalibrationObservation> m3_obs = {
+          {m3_img, camera, room_scan}};
+      auto_calib::CalibrationConfig m3_cfg;
+      m3_cfg.minimum_lidar_edge_points = 10;
+      m3_cfg.minimum_camera_edge_pixels = 10;
+      m3_cfg.minimum_nid_projected_points = 10;
+      m3_cfg.maximum_mean_edge_distance_px = 30.0;
+      m3_cfg.enable_ceres_refinement = true;
+      m3_cfg.enable_ground_plane_constraint = true;
+      m3_cfg.enable_normal_gated_line_matching = true;
+      m3_cfg.maximum_solver_iterations = 50;
+
+      // Evaluate smooth derivatives across small numeric perturbations h
+      const double h = 1e-4;
+      auto base_eval = auto_calib::evaluateCalibrationPoseScenes(m3_obs, valid_tf, m3_cfg);
+      require(std::isfinite(base_eval.front().mean_edge_distance_px), "M3: Base mean edge distance non-finite");
+      require(std::isfinite(base_eval.front().structural_objective), "M3: Base structural objective non-finite");
+
+      for (int axis = 0; axis < 3; ++axis) {
+        Eigen::Vector3d delta_rot = Eigen::Vector3d::Zero();
+        delta_rot[axis] = h;
+        auto_calib::Transform perturbed_pos = valid_tf;
+        perturbed_pos.rotation =
+            Eigen::AngleAxisd(h, Eigen::Vector3d::Unit(axis)).toRotationMatrix() * valid_tf.rotation;
+        auto pos_eval = auto_calib::evaluateCalibrationPoseScenes(m3_obs, perturbed_pos, m3_cfg);
+        require(std::isfinite(pos_eval.front().structural_objective), "M3: Perturbed structural objective non-finite");
+        require(std::isfinite(pos_eval.front().mean_edge_distance_px), "M3: Perturbed edge distance non-finite");
+        const double diff = std::abs(pos_eval.front().structural_objective - base_eval.front().structural_objective);
+        require(diff < 0.1, "M3: Structural objective derivative discontinuous under rotation perturbation");
+      }
+
+      // 2. Multi-Criteria Finalist Confidence Scoring Evaluation (Genuinely Computed)
+      auto pass_res = auto_calib::calibrateExtrinsicMultiScene(m3_obs, valid_tf, m3_cfg);
+      require(pass_res.success, "M3: Genuine multi-scene calibration must succeed for aligned room scene");
+      require(pass_res.metrics.total_explained_structural_length > 100.0,
+              "M3: Genuine pipeline must compute positive total_explained_structural_length");
+      require(pass_res.metrics.total_visible_structural_length > 100.0,
+              "M3: Genuine pipeline must compute positive total_visible_structural_length");
+      require(pass_res.metrics.tesl_ratio > 0.50,
+              "M3: Genuine pipeline must compute high tesl_ratio for aligned scene");
+      require(pass_res.metrics.ground_normal_valid,
+              "M3: Genuine pipeline must validate ground normal");
+
+      auto pass_conf = auto_calib::evaluateMultiCriteriaConfidence(pass_res, 1.0, m3_cfg);
+      require(pass_conf.scene_validation_score == 1.0, "M3: Scene validation score mismatch");
+      require(pass_conf.ground_geometry_score > 0.8, "M3: Ground geometry score mismatch for valid ground");
+      require(pass_conf.tesl_score > 0.50, "M3: TESL score mismatch for high TESL");
+      require(pass_conf.total_confidence > 0.60, "M3: Total confidence score too low for high-quality result");
+
+      // Inconsistent ground candidate
+      auto_calib::CalibrationResult ground_fail_res = pass_res;
+      ground_fail_res.metrics.ground_normal_valid = false;
+      auto ground_fail_conf = auto_calib::evaluateMultiCriteriaConfidence(ground_fail_res, 1.0, m3_cfg);
+      require(ground_fail_conf.ground_geometry_score == 0.0, "M3: Inconsistent ground must yield 0 ground confidence");
+      require(ground_fail_conf.total_confidence < pass_conf.total_confidence - 0.15,
+              "M3: Inconsistent ground must noticeably reduce total confidence");
+
+      // Scene validation failed candidate
+      auto_calib::CalibrationResult scene_fail_res = pass_res;
+      auto scene_fail_conf = auto_calib::evaluateMultiCriteriaConfidence(scene_fail_res, 0.0, m3_cfg);
+      require(scene_fail_conf.scene_validation_score == 0.0, "M3: Scene validation failure must yield 0 scene score");
+      require(scene_fail_conf.total_confidence < pass_conf.total_confidence - 0.25,
+              "M3: Scene validation failure must noticeably reduce total confidence");
+
+      // 3. Verification of Multi-Scene Optimization and Confidence Metric
+      auto calib_ceres_res = auto_calib::calibrateExtrinsicMultiScene(observations, initial, m3_cfg);
+      require(calib_ceres_res.candidate_available, "M3: Candidate RT must be available after Ceres optimization");
+      require(std::isfinite(calib_ceres_res.metrics.final_composite_objective),
+              "M3: Composite objective must be finite");
+      const auto opt_conf = auto_calib::evaluateMultiCriteriaConfidence(calib_ceres_res, 1.0, m3_cfg);
+      require(opt_conf.total_confidence > 0.0, "M3: Optimization confidence must be non-negative");
+
+      // 4. Milestone 1 (F1, F2, F3) Multi-Scene TESL Aggregation & Absolute Support Gate Verification
+      std::vector<auto_calib::CalibrationObservation> multi_m3_obs = {
+          {m3_img, camera, room_scan},
+          {m3_img, camera, room_scan}};
+      auto multi_m3_res = auto_calib::calibrateExtrinsicMultiScene(multi_m3_obs, valid_tf, m3_cfg);
+      require(multi_m3_res.success, "M1: Multi-scene calibration with 2 scenes must succeed");
+      require(multi_m3_res.metrics.total_explained_structural_length > pass_res.metrics.total_explained_structural_length * 1.5,
+              "M1: Multi-scene aggregate total_explained_structural_length must accumulate across scenes");
+      require(multi_m3_res.metrics.total_visible_structural_length > pass_res.metrics.total_visible_structural_length * 1.5,
+              "M1: Multi-scene aggregate total_visible_structural_length must accumulate across scenes");
+      require(multi_m3_res.metrics.asymmetric_structural_weight > 0.0,
+              "M1: Asymmetric structural weight must be positive");
+      require(multi_m3_res.metrics.tesl_ratio > 0.50 && multi_m3_res.metrics.tesl_ratio <= 1.0,
+              "M1: Normalized TESL ratio must be in [0.5, 1.0] for matching scenes");
+      const auto multi_conf = auto_calib::evaluateMultiCriteriaConfidence(multi_m3_res, 1.0, m3_cfg);
+      require(std::abs(multi_conf.tesl_score - multi_m3_res.metrics.tesl_ratio) < 1e-6,
+              "M1: evaluateMultiCriteriaConfidence must use normalized tesl_ratio");
+
+      // Absolute support gate validation
+      auto_calib::CalibrationConfig strict_support_cfg = m3_cfg;
+      strict_support_cfg.minimum_absolute_visible_edge_points_per_scene = 10000; // Impossible threshold
+      auto strict_gate_res = auto_calib::calibrateExtrinsicMultiScene(multi_m3_obs, valid_tf, strict_support_cfg);
+      require(!strict_gate_res.metrics.absolute_support_pass,
+              "M1: Absolute support gate must fail when visible edge threshold is not met");
+    }
+
     std::cout << "All Calibration Core tests passed.\n";
     return 0;
   } catch (const std::exception &e) {

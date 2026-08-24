@@ -4,6 +4,7 @@
 - 수정 이력:
   - 2026-07-31 — Galaxy Tab S7 전체 화면 ChArUco를 기본 현장 매체로 변경
   - 2026-07-30 — LiDAR 없는 2D ChArUco Manual Calibration으로 전면 재설계
+  - 2026-08-14 — 태블릿 디스플레이 평면을 이용한 geometry-corrected RT reference 경로와 session-const-env 결과 추가
 
 ## 목적
 
@@ -27,10 +28,25 @@ Natural camera image + 1D LiDAR pan-tilt sweep
         └─ targetless Calibration Core ─> T_camera_lidar
 ```
 
+태블릿을 이용한 기준/진단 확장 경로는 Manual core와 분리된 optional path다.
+
+```text
+LiDAR JSON/PCD ─> tablet display plane candidate
+                        │
+display_spec + board_config + portrait/CW90 ─> T_display_plane_marker_board
+                        │
+                        └─ T_lidar_marker_board
+                           + T_camera_marker_board
+                             └─ preliminary T_camera_lidar
+```
+
+이 경로는 LiDAR가 ChArUco 무늬를 직접 인식하는 방식이 아니다. LiDAR가 관측한 **활성 디스플레이 평면**과 문서화된 강체 기하(디스플레이 크기, 보드 크기, 중앙 배치, 표시 회전)를 조합한다. 화면 edge/plane fit 품질이 독립적으로 검증되지 않은 결과는 `ESTIMATED_GEOMETRY_CORRECTED`로만 저장하고 최종 conformance `PASS`로 취급하지 않는다.
+
 ## 출력의 차이
 
 - Manual pose: `T_camera_marker_board`
 - Automatic pose: `T_camera_lidar`
+- Tablet-assisted reference extension: `T_lidar_marker_board`와 예비 `T_camera_lidar`
 
 두 transform은 child frame이 다르므로 직접 차감하면 안 된다. Marker image에는
 LiDAR frame 정보가 전혀 없기 때문이다.
@@ -48,8 +64,10 @@ T_camera_lidar
   = T_camera_marker_board × inverse(T_lidar_marker_board)
 ```
 
-`T_lidar_marker_board`는 정밀 jig, CAD/측정기 또는 survey로 얻어야 한다. Automatic
-결과에서 역산하면 독립 비교가 아니므로 금지한다.
+최종 독립 reference의 `T_lidar_marker_board`는 정밀 jig, CAD/측정기, survey 또는
+LiDAR-visible rigid target으로 얻는 것을 우선한다. 태블릿 디스플레이 geometry로
+추정한 값은 빠른 진단/실제 데이터 검증에는 사용할 수 있지만, Automatic 결과에서
+역산하면 독립 비교가 아니므로 금지한다.
 
 ## 제품 목적과 관계
 

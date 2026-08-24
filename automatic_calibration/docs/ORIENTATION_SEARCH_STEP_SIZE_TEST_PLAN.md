@@ -1,7 +1,7 @@
 # Yaw–Roll(Coarse Down) 탐색 간격 및 인접 후보 보정 시험 계획
 
 작성일: 2026-08-12
-상태: 구현 전 시험 설계
+상태: staged 구현 반영 / full-search 선행 게이트 후 benchmark 계획
 대상: Automatic Calibration Core 초기 방향 탐색
 
 ## 1. 목적
@@ -147,8 +147,13 @@ basin_raw_best <= global_raw_best + delta_raw
 yaw는 wrap-around하고 down은 0~90°로 제한한다. 넓은 basin은 fine 후보 수 상한을
 두고, 초과 시 서로 떨어진 local minimum 최대 3개로 분할한다.
 
-Fine 결과 상위 basin마다 한 번만 Ceres refinement를 수행한다. Coarse의 모든
-orientation에서 Ceres를 실행하지 않는다.
+Fine 결과 중 최종 winner 하나에만 Ceres refinement를 수행한다. Coarse의 모든
+orientation이나 각 basin마다 Ceres를 실행하지 않는다. 상위 basin별 Ceres 비교는
+별도 연구 benchmark에서만 허용한다.
+
+현재 실행기의 `--search-strategy staged`는 coarse → top-3 → 5° → 1° → 단일 Ceres
+경로를 사용하며, `calibration_result.json`의 `search_stages`와
+`ceres_execution_policy`로 실제 실행 여부를 기록한다.
 
 ## 9. 시험 데이터
 
@@ -306,7 +311,10 @@ Git revision, Docker image digest, CPU/thread 수, 입력 checksum과 실행 시
 
 입력: `data/real_calibration/session-const-env/2026-08-11/130333`
 범위: 채널별 yaw 360개 × down 91개 = 32,760 orientation
-실행 조건: yaw/down step 1°, 제조사 FOV 기반 K 고정, 단일 관측 진단 모드
+실행 조건: yaw/down step 1°, 당시 실험의 제조사 FOV 기반 K 고정, 단일 관측 진단 모드
+
+> 이 절은 2026-08-12 과거 진단 기록이다. 현재 MVP 제품 경로는 같은 profile의 Manual
+> ChArUco `K+D`를 고정한다. 제조사 FOV K와 K+RT 공동 추정은 연구·민감도 진단으로만 남긴다.
 
 아래 표와 결과 JSON의 방향 필드는 `down_deg`와 `yaw_deg`를 분리해 기록하며,
 튜플로 표시할 때는 `(down_deg, yaw_deg)` 순서를 사용한다.

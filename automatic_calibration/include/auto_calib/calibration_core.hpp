@@ -99,8 +99,11 @@ struct CalibrationConfig {
   double persistent_occlusion_min_overlap_ratio = 0.50;
   double persistent_occlusion_confidence = 0.45;
   double structural_direction_weight = 0.25;
-  double structural_endpoint_weight = 0.40;
-  double structural_overlap_weight = 0.35;
+  double structural_endpoint_weight = 0.35;
+  double structural_overlap_weight = 0.25;
+  double structural_normal_weight = 0.15;
+  double structural_line_sigma_px = 10.0;
+  bool enable_normal_gated_line_matching = true;
   double structural_max_direction_difference_rad = 0.5235987755982988;
   double maximum_structural_pair_cost = 0.70;
   double manhattan_direction_weight = 0.0;
@@ -121,13 +124,35 @@ struct CalibrationConfig {
   bool enable_visibility_filter = true;
   double visibility_depth_tolerance_m = 0.01;
   double coarse_visibility_scale = 0.25;
-  double minimum_nid_improvement_ratio = 0.0;
+  double minimum_nid_improvement_ratio = 0.01;
   double coarse_yaw_span_rad = 0.0;
   double coarse_yaw_step_rad = 0.2617993877991494;
   bool use_coarse_yaw_bounds = false;
   double coarse_yaw_min_rad = -3.14159265358979323846;
   double coarse_yaw_max_rad = 3.14159265358979323846;
+  bool enable_ground_plane_constraint = true;
+  double ground_plane_normal_tolerance_rad = 0.3490658503988659;
+  double minimum_camera_ground_height_m = 0.8;
+  double maximum_camera_ground_height_m = 5.0;
+  double minimum_camera_downward_pitch_deg = 5.0;
+  double maximum_camera_downward_pitch_deg = 60.0;
+  double maximum_camera_ground_tilt_deg = 85.0;
+  double ground_normal_weight = 0.0;
+  bool enable_asymmetric_line_weighting = true;
+  double asymmetric_feature_weight_factor = 1.0;
+  double ceiling_suppression_factor = 0.40;
+  double vertical_corner_boost_factor = 1.80;
+  double total_explained_structural_length_min = 0.0;
   double minimum_multistart_objective_margin = 0.0;
+  std::size_t minimum_absolute_visible_edge_points_per_scene = 100;
+  std::size_t minimum_absolute_nid_points_per_scene = 100;
+  double minimum_explained_structural_ratio = 0.10;
+  double minimum_global_coverage_ratio = 0.0;
+  double minimum_finalist_confidence_margin = 0.02;
+  std::size_t global_reference_visible_edge_points = 0;
+  std::size_t global_reference_nid_projected_points = 0;
+  std::size_t global_reference_edge_active_cells = 0;
+  double global_reference_structural_length = 0.0;
 };
 struct CalibrationMetrics {
   std::size_t camera_edge_pixels = 0, lidar_edge_points = 0,
@@ -164,7 +189,18 @@ struct CalibrationMetrics {
          final_manhattan_horizontal_error_deg = -1.0,
          multistart_objective_margin = 1.0, selected_multistart_yaw_deg = 0.0,
          edge_coverage_ratio = 1.0, nid_coverage_ratio = 1.0,
-         edge_spatial_coverage_ratio = 1.0, coverage_objective = 0.0;
+          edge_spatial_coverage_ratio = 1.0, coverage_objective = 0.0,
+          ground_height_m = 0.0, ground_tilt_deg = 0.0,
+          total_explained_structural_length = 0.0,
+          total_visible_structural_length = 0.0,
+          tesl_ratio = 0.0,
+          global_edge_coverage_ratio = 0.0,
+          global_nid_coverage_ratio = 0.0,
+          finalist_confidence_margin = 0.0,
+          asymmetric_structural_weight = 0.0,
+          multi_criteria_confidence_score = 0.0;
+  bool ground_normal_valid = true;
+  bool absolute_support_pass = false;
   std::size_t manhattan_vertical_inliers = 0,
               manhattan_horizontal_axes = 0,
               nid_active_spatial_cells = 0,
@@ -207,12 +243,41 @@ struct PoseSceneMetrics {
   std::size_t signal_active_spatial_cells = 0;
   double projected_ratio = 0.0;
   double mean_edge_distance_px = 0.0;
+  double edge_objective = std::numeric_limits<double>::infinity();
   double geometry_nid = 1.0;
+  double geometry_nid_objective = 1.0;
   double range_nid = -1.0;
   double normal_nid = -1.0;
   double structural_objective = 1.0;
+  double structural_score_weight = 0.0;
+  double manhattan_objective = 1.0;
   double manhattan_vertical_error_deg = -1.0;
   double signal_nmi = 1.0;
+  double signal_nmi_objective = 1.0;
+  bool ground_normal_valid = true;
+  double ground_height_m = 0.0;
+  double ground_tilt_deg = 0.0;
+  double total_explained_structural_length = 0.0;
+  double total_visible_structural_length = 0.0;
+  double tesl_ratio = 0.0;
+  double asymmetric_structural_weight = 0.0;
+};
+struct PoseObjectiveMetrics {
+  std::size_t scene_count = 0;
+  std::size_t visible_edge_points = 0;
+  std::size_t nid_projected_points = 0;
+  std::size_t edge_active_spatial_cells = 0;
+  double edge_objective = 0.0;
+  double geometry_nid_objective = 1.0;
+  double signal_nmi_objective = 1.0;
+  double structural_objective = 1.0;
+  double manhattan_objective = 1.0;
+  double direction_prior_objective = 0.0;
+  double edge_coverage_ratio = 0.0;
+  double nid_coverage_ratio = 0.0;
+  double edge_spatial_coverage_ratio = 0.0;
+  double coverage_objective = 1.0;
+  double composite_objective = std::numeric_limits<double>::infinity();
 };
 enum class StructuralLineSource {
   PlaneIntersection,
@@ -221,16 +286,21 @@ enum class StructuralLineSource {
   PersistentOcclusion
 };
 struct StructuralLineSegment3d {
-  Eigen::Vector3d a, b;
+  Eigen::Vector3d a = Eigen::Vector3d::Zero();
+  Eigen::Vector3d b = Eigen::Vector3d::Zero();
   StructuralLineSource source = StructuralLineSource::PlaneIntersection;
   double confidence = 1.0;
   std::size_t support_observations = 1;
+  bool has_plane_normals = false;
+  Eigen::Vector3d n1 = Eigen::Vector3d::Zero();
+  Eigen::Vector3d n2 = Eigen::Vector3d::Zero();
 };
 struct LidarPlane3d {
   Eigen::Vector3d normal = Eigen::Vector3d::Zero();
   double offset = 0.0;
   std::size_t support_points = 0;
   double rms_error_m = 0.0;
+  double bounding_area_m2 = 0.0;
 };
 struct LidarPlaneSegmentation {
   std::vector<Eigen::Vector3d> normals;
@@ -274,6 +344,13 @@ struct CoarseOrientationScore {
   double edge_spatial_coverage_ratio = 1.0;
   double coverage_objective = 0.0;
   bool overlap_valid = false;
+  bool ground_normal_valid = true;
+  double ground_height_m = 0.0;
+  double ground_tilt_deg = 0.0;
+  double total_explained_structural_length = 0.0;
+  double total_visible_structural_length = 0.0;
+  double tesl_ratio = 0.0;
+  double asymmetric_structural_weight = 0.0;
 };
 struct CalibrationResult {
   bool success = false;
@@ -307,6 +384,31 @@ std::vector<Eigen::Vector3d> extractLidarEdgePoints(
     const CalibrationConfig &config);
 LidarPlaneSegmentation segmentLidarPlanes(const Scan &scan,
                                           const CalibrationConfig &config);
+struct DominantPlanes {
+  bool has_ground = false;
+  Eigen::Vector3d ground_normal = Eigen::Vector3d::UnitY();
+  double ground_offset = 0.0;
+  std::size_t ground_points = 0;
+  double ground_y = 0.0;
+  double ground_area_m2 = 0.0;
+
+  bool has_ceiling = false;
+  Eigen::Vector3d ceiling_normal = -Eigen::Vector3d::UnitY();
+  double ceiling_offset = 0.0;
+  std::size_t ceiling_points = 0;
+  double ceiling_y = 0.0;
+};
+DominantPlanes findDominantPlanes(const LidarPlaneSegmentation &segmentation,
+                                 const CalibrationConfig &config = {});
+struct GroundEvaluation {
+  bool valid = true;
+  double height_m = 0.0;
+  double tilt_deg = 0.0;
+  double downward_pitch_deg = 0.0;
+};
+GroundEvaluation evaluateGroundConsistency(
+    const Transform &t_camera_lidar, const DominantPlanes &planes,
+    const CalibrationConfig &config = {});
 std::vector<StructuralLineSegment3d> extractLidarPlaneIntersectionSegments(
     const Scan &scan, const LidarPlaneSegmentation &segmentation,
     const CalibrationConfig &config,
@@ -341,7 +443,25 @@ std::vector<SignalNmiPoseScore> evaluateSignalNmiPoses(
     const CalibrationConfig &config = {});
 std::vector<PoseSceneMetrics> evaluateCalibrationPoseScenes(
     const std::vector<CalibrationObservation> &observations,
-    const Transform &t_camera_lidar, const CalibrationConfig &config = {});
+    const Transform &t_camera_lidar, const CalibrationConfig &config = {},
+    const Transform *manhattan_feature_prior = nullptr);
+PoseObjectiveMetrics summarizeCalibrationPoseScenes(
+    const std::vector<PoseSceneMetrics> &scene_metrics,
+    const Transform &t_camera_lidar, const CalibrationConfig &config,
+    std::size_t reference_visible_edge_points,
+    std::size_t reference_nid_projected_points,
+    std::size_t reference_edge_active_spatial_cells);
+struct MultiCriteriaConfidence {
+  double scene_validation_score = 0.0;
+  double ground_geometry_score = 0.0;
+  double tesl_score = 0.0;
+  double spatial_nid_score = 0.0;
+  double objective_score = 0.0;
+  double total_confidence = 0.0;
+};
+MultiCriteriaConfidence evaluateMultiCriteriaConfidence(
+    const CalibrationResult &result, double training_scene_pass_ratio,
+    const CalibrationConfig &config = {});
 PoseError calculatePoseError(const Transform &estimated,
                              const Transform &ground_truth);
 } // namespace auto_calib

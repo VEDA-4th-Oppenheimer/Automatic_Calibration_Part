@@ -53,6 +53,16 @@ float bilinear(const cv::Mat &image, double u, double v) {
   return static_cast<float>((1 - dy) * ((1 - dx) * a[x] + dx * a[x + 1]) +
                             dy * ((1 - dx) * b[x] + dx * b[x + 1]));
 }
+inline double smoothHuberCap(double residual, double cap) {
+  if (residual <= 0.0)
+    return 0.0;
+  const double threshold = 0.5 * cap;
+  if (residual <= threshold)
+    return residual;
+  const double span = cap - threshold;
+  const double excess = residual - threshold;
+  return threshold + span * std::tanh(excess / span);
+}
 double residualForPoint(const double *p, const Eigen::Vector3d &point,
                         const CameraModel &camera, const cv::Mat &distance,
                         const double *intrinsics = nullptr) {
@@ -61,19 +71,24 @@ double residualForPoint(const double *p, const Eigen::Vector3d &point,
   out[0] += p[3];
   out[1] += p[4];
   out[2] += p[5];
-  if (out[2] <= 0.05)
-    return 50.0;
+  if (out[2] <= 0.05) {
+    const double depth_defect = 0.05 - out[2];
+    return 50.0 + depth_defect * 100.0;
+  }
   const double fx = intrinsics ? intrinsics[0] : camera.k(0, 0);
   const double fy = intrinsics ? intrinsics[1] : camera.k(1, 1);
   const double cx = intrinsics ? intrinsics[2] : camera.k(0, 2);
   const double cy = intrinsics ? intrinsics[3] : camera.k(1, 2);
   double u = fx * out[0] / out[2] + cx, v = fy * out[1] / out[2] + cy;
-  if (u < 0 || v < 0 || u >= distance.cols - 1 || v >= distance.rows - 1) {
-    double du = u < 0 ? -u
-                      : (u >= distance.cols - 1 ? u - (distance.cols - 2) : 0),
-           dv = v < 0 ? -v
-                      : (v >= distance.rows - 1 ? v - (distance.rows - 2) : 0);
-    return 30.0 + std::hypot(du, dv);
+  const double max_u = static_cast<double>(distance.cols - 1);
+  const double max_v = static_cast<double>(distance.rows - 1);
+  if (u < 0.0 || v < 0.0 || u >= max_u || v >= max_v) {
+    const double clamped_u = std::clamp(u, 0.0, max_u - 1e-4);
+    const double clamped_v = std::clamp(v, 0.0, max_v - 1e-4);
+    const double base_dist = bilinear(distance, clamped_u, clamped_v);
+    const double du = u < 0.0 ? -u : (u > max_u ? u - max_u : 0.0);
+    const double dv = v < 0.0 ? -v : (v > max_v ? v - max_v : 0.0);
+    return base_dist + std::hypot(du, dv);
   }
   return bilinear(distance, u, v);
 }
@@ -105,6 +120,9 @@ struct Evaluation {
   std::size_t horizontal_projected = 0, vertical_projected = 0;
   double score_weight = 0.0, horizontal_score_weight = 0.0,
          vertical_score_weight = 0.0;
+  double total_explained_structural_length = 0.0;
+  double total_visible_structural_length = 0.0;
+  double asymmetric_structural_weight = 0.0;
 };
 cv::Mat buildCameraGradientFeature(const cv::Mat &bgr) {
   cv::Mat gray;
@@ -205,6 +223,9 @@ struct ImageLineSegment {
   cv::Point2d a, b;
   double angle = 0.0;
   double length = 0.0;
+  cv::Point2d normal = {0.0, 0.0};
+  cv::Point2d gradient = {0.0, 0.0};
+  bool has_gradient = false;
 };
 using LidarLineSegment = StructuralLineSegment3d;
 struct StructuralImageFeature {
@@ -238,6 +259,10 @@ StructuralImageFeature buildStructuralLineDistance(
     cv::cvtColor(bgr, gray, cv::COLOR_BGR2GRAY);
   else
     gray = bgr;
+  cv::Mat gray_f, gx, gy;
+  gray.convertTo(gray_f, CV_32F, 1.0 / 255.0);
+  cv::Sobel(gray_f, gx, CV_32F, 1, 0, 3);
+  cv::Sobel(gray_f, gy, CV_32F, 0, 1, 3);
   std::vector<cv::Vec4f> lines;
   cv::createLineSegmentDetector(cv::LSD_REFINE_STD)->detect(gray, lines);
   constexpr int direction_bins = 8;
@@ -260,8 +285,36 @@ StructuralImageFeature buildStructuralLineDistance(
     cv::line(masks[bin], {cvRound(line[0]), cvRound(line[1])},
              {cvRound(line[2]), cvRound(line[3])}, cv::Scalar(255), 2,
              cv::LINE_AA);
+    const cv::Point2d line_normal(-std::sin(angle), std::cos(angle));
+    cv::Point2d avg_grad(0.0, 0.0);
+    constexpr int sample_count = 9;
+    for (int s = 1; s <= sample_count; ++s) {
+      const double t = static_cast<double>(s) / (sample_count + 1);
+      const double sx = (1.0 - t) * line[0] + t * line[2];
+      const double sy = (1.0 - t) * line[1] + t * line[3];
+      const int ix =
+          std::clamp(static_cast<int>(std::lround(sx)), 0, gray.cols - 1);
+      const int iy =
+          std::clamp(static_cast<int>(std::lround(sy)), 0, gray.rows - 1);
+      avg_grad.x += static_cast<double>(gx.at<float>(iy, ix));
+      avg_grad.y += static_cast<double>(gy.at<float>(iy, ix));
+    }
+    avg_grad *= (1.0 / sample_count);
+    const double grad_norm = std::hypot(avg_grad.x, avg_grad.y);
+    bool has_grad = false;
+    cv::Point2d grad_unit(0.0, 0.0);
+    if (grad_norm > 1e-4) {
+      grad_unit = avg_grad * (1.0 / grad_norm);
+      has_grad = true;
+    }
     retained_segments.push_back(
-        {{line[0], line[1]}, {line[2], line[3]}, angle, length});
+        {{line[0], line[1]},
+         {line[2], line[3]},
+         angle,
+         length,
+         line_normal,
+         grad_unit,
+         has_grad});
     ++retained;
   }
   std::vector<cv::Mat> distances;
@@ -448,8 +501,7 @@ ManhattanEvaluation evaluateManhattanDirections(
   // even though the quality gate was stricter than that scale.
   const auto robustSquared = [scale](double angle_rad) {
     const double normalized = angle_rad / scale;
-    return normalized <= 1.0 ? normalized * normalized
-                             : 2.0 * normalized - 1.0;
+    return 2.0 * (std::sqrt(1.0 + normalized * normalized) - 1.0);
   };
   const double vertical_score = robustSquared(result.vertical_error_rad);
   std::vector<std::tuple<double, std::size_t, std::size_t>> candidates;
@@ -872,13 +924,17 @@ Evaluation evaluateStructuralLines(
     double angle = 0.0;
     double length = 0.0;
     double confidence = 1.0;
+    bool has_dihedral_normal = false;
+    cv::Point2d dihedral_normal = {0.0, 0.0};
   };
   struct Candidate {
     std::size_t projected = 0, image = 0;
     double cost = 1.0;
+    double endpoint_distance = 0.0;
   };
   std::vector<ProjectedLine> projected_lines;
   const double cap = std::max(1.0, residual_cap_px);
+  const Eigen::Matrix3d rotation = fromParameters(p).rotation;
   for (const auto &segment : segments) {
     if (segment.confidence <= 0.0)
       continue;
@@ -909,8 +965,42 @@ Evaluation evaluateStructuralLines(
     double angle = std::atan2(projected_vector.y, projected_vector.x);
     if (angle < 0.0)
       angle += M_PI;
+
+    bool has_dihedral = false;
+    cv::Point2d dihedral_2d(0.0, 0.0);
+    if (segment.has_plane_normals) {
+      const Eigen::Vector3d n1_cam = rotation * segment.n1;
+      const Eigen::Vector3d n2_cam = rotation * segment.n2;
+      const Eigen::Vector3d delta_n =
+          segment.n2.norm() > 1e-6 ? (n1_cam - n2_cam) : n1_cam;
+      const double fx = intrinsics ? (*intrinsics)[0] : camera.k(0, 0);
+      const double fy = intrinsics ? (*intrinsics)[1] : camera.k(1, 1);
+      const double cx = intrinsics ? (*intrinsics)[2] : camera.k(0, 2);
+      const double cy = intrinsics ? (*intrinsics)[3] : camera.k(1, 2);
+      if (std::isfinite(fx) && std::isfinite(fy) && fx > 1e-6 && fy > 1e-6) {
+        Eigen::Matrix3d k_mat = Eigen::Matrix3d::Identity();
+        k_mat(0, 0) = fx;
+        k_mat(1, 1) = fy;
+        k_mat(0, 2) = std::isfinite(cx) ? cx : 0.0;
+        k_mat(1, 2) = std::isfinite(cy) ? cy : 0.0;
+        const Eigen::Matrix3d inv_k_t = k_mat.inverse().transpose();
+        const Eigen::Vector3d l_2d = inv_k_t * delta_n;
+        const double n_len = std::hypot(l_2d.x(), l_2d.y());
+        if (n_len > 1e-4) {
+          dihedral_2d = {l_2d.x() / n_len, l_2d.y() / n_len};
+          has_dihedral = true;
+        }
+      } else {
+        const double n_len = std::hypot(delta_n.x(), delta_n.y());
+        if (n_len > 1e-4) {
+          dihedral_2d = {delta_n.x() / n_len, delta_n.y() / n_len};
+          has_dihedral = true;
+        }
+      }
+    }
     projected_lines.push_back(
-        {a, b, angle, projected_length, segment.confidence});
+        {a, b, angle, projected_length, segment.confidence, has_dihedral,
+         dihedral_2d});
   }
   result.visible = projected_lines.size();
   std::vector<Candidate> candidates;
@@ -924,7 +1014,33 @@ Evaluation evaluateStructuralLines(
           undirectedAngleDifference(projected.angle, image_line.angle);
       if (direction_difference > config.structural_max_direction_difference_rad)
         continue;
-      const cv::Point2d axis = (image_line.b - image_line.a) / image_line.length;
+
+      // 2D line normals
+      const cv::Point2d n_proj(-std::sin(projected.angle),
+                               std::cos(projected.angle));
+      const cv::Point2d n_img(-std::sin(image_line.angle),
+                              std::cos(image_line.angle));
+      double normal_dot = std::abs(n_proj.x * n_img.x + n_proj.y * n_img.y);
+
+      if (projected.has_dihedral_normal) {
+        const double d_dot = std::abs(projected.dihedral_normal.x * n_img.x +
+                                      projected.dihedral_normal.y * n_img.y);
+        normal_dot = 0.5 * (normal_dot + d_dot);
+      }
+      if (image_line.has_gradient) {
+        const double g_dot = std::abs(n_proj.x * image_line.gradient.x +
+                                      n_proj.y * image_line.gradient.y);
+        normal_dot = 0.5 * (normal_dot + g_dot);
+      }
+      normal_dot = std::clamp(normal_dot, 0.0, 1.0);
+
+      if (config.enable_normal_gated_line_matching &&
+          normal_dot <
+              std::cos(config.structural_max_direction_difference_rad))
+        continue;
+
+      const cv::Point2d axis =
+          (image_line.b - image_line.a) / image_line.length;
       const auto along = [&](const cv::Point2d &point) {
         return (point - image_line.a).dot(axis);
       };
@@ -949,12 +1065,21 @@ Evaluation evaluateStructuralLines(
                        config.structural_max_direction_difference_rad,
                    2.0);
       const double overlap_objective = std::pow(1.0 - overlap_ratio, 2.0);
+      const double normal_objective = std::pow(1.0 - normal_dot, 2.0);
+
+      const double total_weight = config.structural_endpoint_weight +
+                                  config.structural_direction_weight +
+                                  config.structural_overlap_weight +
+                                  config.structural_normal_weight;
       const double cost =
-          config.structural_endpoint_weight * endpoint_objective +
-          config.structural_direction_weight * direction_objective +
-          config.structural_overlap_weight * overlap_objective;
+          (config.structural_endpoint_weight * endpoint_objective +
+           config.structural_direction_weight * direction_objective +
+           config.structural_overlap_weight * overlap_objective +
+           config.structural_normal_weight * normal_objective) /
+          std::max(1e-9, total_weight);
       if (cost <= config.maximum_structural_pair_cost)
-        candidates.push_back({projected_index, image_index, cost});
+        candidates.push_back(
+            {projected_index, image_index, cost, endpoint_distance});
     }
   }
   std::sort(candidates.begin(), candidates.end(),
@@ -962,6 +1087,7 @@ Evaluation evaluateStructuralLines(
               return a.cost < b.cost;
             });
   std::vector<double> assigned_cost(projected_lines.size(), 1.0);
+  std::vector<double> assigned_endpoint_dist(projected_lines.size(), cap);
   std::vector<unsigned char> projected_assigned(projected_lines.size(), 0);
   std::vector<unsigned char> image_assigned(image_lines.segments.size(), 0);
   for (const auto &candidate : candidates) {
@@ -971,45 +1097,103 @@ Evaluation evaluateStructuralLines(
     projected_assigned[candidate.projected] = 1;
     image_assigned[candidate.image] = 1;
     assigned_cost[candidate.projected] = candidate.cost;
+    assigned_endpoint_dist[candidate.projected] =
+        candidate.endpoint_distance;
     ++result.projected;
   }
-  double sum = 0.0, squared_sum = 0.0;
-  double horizontal_sum = 0.0, vertical_sum = 0.0;
+
+  const double sigma = config.structural_line_sigma_px > 0.0
+                           ? config.structural_line_sigma_px
+                           : std::max(1.0, cap * 0.5);
+  const double two_sigma_sq = 2.0 * sigma * sigma;
+
+  double total_visible_weighted_length = 0.0;
+  double total_explained_weighted_length = 0.0;
+  double horizontal_visible_weighted_length = 0.0;
+  double horizontal_explained_weighted_length = 0.0;
+  double vertical_visible_weighted_length = 0.0;
+  double vertical_explained_weighted_length = 0.0;
+  double sum_matched_endpoint = 0.0;
+
   for (std::size_t i = 0; i < projected_lines.size(); ++i) {
     const auto &projected = projected_lines[i];
-    const double best = assigned_cost[i];
     const double weight = projected.confidence;
-    sum += weight * std::sqrt(best) * cap;
-    squared_sum += weight * best;
+    const double length = projected.length;
+    const double w_L = weight * length;
+
+    total_visible_weighted_length += w_L;
+    result.total_visible_structural_length += length;
+    result.asymmetric_structural_weight += weight;
     result.score_weight += weight;
+
     const double horizontal_distance =
         std::min(projected.angle, M_PI - projected.angle);
     const double vertical_distance =
         std::abs(projected.angle - 0.5 * M_PI);
-    if (horizontal_distance <= M_PI / 6.0) {
-      horizontal_sum += weight * best;
+    const bool is_horizontal = (horizontal_distance <= M_PI / 6.0);
+    const bool is_vertical = (vertical_distance <= M_PI / 6.0);
+
+    if (is_horizontal) {
+      horizontal_visible_weighted_length += w_L;
       result.horizontal_score_weight += weight;
       ++result.horizontal_visible;
-      if (projected_assigned[i])
-        ++result.horizontal_projected;
-    } else if (vertical_distance <= M_PI / 6.0) {
-      vertical_sum += weight * best;
+    } else if (is_vertical) {
+      vertical_visible_weighted_length += w_L;
       result.vertical_score_weight += weight;
       ++result.vertical_visible;
-      if (projected_assigned[i])
+    }
+
+    if (projected_assigned[i] &&
+        assigned_cost[i] <= config.maximum_structural_pair_cost) {
+      const double d = assigned_endpoint_dist[i];
+      const double exp_factor = std::exp(-d * d / two_sigma_sq);
+      const double explained_term = w_L * exp_factor;
+
+      total_explained_weighted_length += explained_term;
+      result.total_explained_structural_length += length;
+      sum_matched_endpoint += d;
+
+      if (is_horizontal) {
+        horizontal_explained_weighted_length += explained_term;
+        ++result.horizontal_projected;
+      } else if (is_vertical) {
+        vertical_explained_weighted_length += explained_term;
         ++result.vertical_projected;
+      }
     }
   }
-  if (result.score_weight > 0.0) {
-    result.mean = sum / result.score_weight;
-    result.normalized_squared = squared_sum / result.score_weight;
+
+  if (total_visible_weighted_length > 1e-9) {
+    result.normalized_squared = std::clamp(
+        1.0 - total_explained_weighted_length / total_visible_weighted_length,
+        0.0, 1.0);
+  } else {
+    result.normalized_squared = 1.0;
   }
-  if (result.horizontal_score_weight > 0.0)
-    result.horizontal_normalized_squared =
-        horizontal_sum / result.horizontal_score_weight;
-  if (result.vertical_score_weight > 0.0)
-    result.vertical_normalized_squared =
-        vertical_sum / result.vertical_score_weight;
+
+  if (result.projected > 0) {
+    result.mean = sum_matched_endpoint / result.projected;
+  } else {
+    result.mean = cap;
+  }
+
+  if (horizontal_visible_weighted_length > 1e-9) {
+    result.horizontal_normalized_squared = std::clamp(
+        1.0 - horizontal_explained_weighted_length /
+                  horizontal_visible_weighted_length,
+        0.0, 1.0);
+  } else {
+    result.horizontal_normalized_squared = 1.0;
+  }
+
+  if (vertical_visible_weighted_length > 1e-9) {
+    result.vertical_normalized_squared = std::clamp(
+        1.0 - vertical_explained_weighted_length /
+                  vertical_visible_weighted_length,
+        0.0, 1.0);
+  } else {
+    result.vertical_normalized_squared = 1.0;
+  }
   return result;
 }
 NidEvaluation normalizedInformationDistance(
@@ -1181,11 +1365,11 @@ struct EdgeCost {
   bool optimize_intrinsics;
   bool operator()(double const *const *blocks, double *residuals) const {
     const double *intrinsics = optimize_intrinsics ? blocks[1] : nullptr;
-    for (std::size_t i = 0; i < points.size(); ++i)
-      residuals[i] =
-          scale * std::min(residual_cap_px,
-                           residualForPoint(blocks[0], points[i], camera,
-                                            distance, intrinsics));
+    for (std::size_t i = 0; i < points.size(); ++i) {
+      const double raw = residualForPoint(blocks[0], points[i], camera,
+                                          distance, intrinsics);
+      residuals[i] = scale * smoothHuberCap(raw, residual_cap_px);
+    }
     return true;
   }
 };
@@ -1209,10 +1393,11 @@ struct StructuralLineCost {
         parameters, segments, camera, image_lines, active,
         config.residual_cap_px, nullptr, config.visibility_depth_tolerance_m,
         config);
-    residuals[0] =
-        scale * std::sqrt(std::isfinite(evaluation.normalized_squared)
-                              ? evaluation.normalized_squared
-                              : 1.0);
+    const double cost = std::isfinite(evaluation.normalized_squared)
+                            ? std::clamp(evaluation.normalized_squared, 0.0, 1.0)
+                            : 1.0;
+    constexpr double kEps = 1e-6;
+    residuals[0] = scale * (std::sqrt(cost + kEps) - std::sqrt(kEps));
     return true;
   }
 };
@@ -1226,7 +1411,11 @@ struct ManhattanCost {
     std::copy(blocks[0], blocks[0] + 6, parameters.begin());
     const ManhattanEvaluation evaluation =
         evaluateManhattanDirections(parameters, image, lidar, config);
-    residuals[0] = scale * std::sqrt(evaluation.score);
+    const double score = std::isfinite(evaluation.score)
+                             ? std::max(0.0, evaluation.score)
+                             : 1.0;
+    constexpr double kEps = 1e-6;
+    residuals[0] = scale * (std::sqrt(score + kEps) - std::sqrt(kEps));
     return true;
   }
 };
@@ -1335,7 +1524,8 @@ Evaluation evaluate(const Parameters &p,
     const double r =
         residualForPoint(p.data(), point, camera, distance,
                          intrinsics ? intrinsics->data() : nullptr);
-    sum += r;
+    const double capped = smoothHuberCap(r, residual_cap_px);
+    sum += capped;
     const double normalized =
         std::min(r, residual_cap_px) / std::max(1.0, residual_cap_px);
     normalized_squared_sum += normalized * normalized;
@@ -1503,41 +1693,50 @@ std::vector<Eigen::Vector3d> extractLidarEdgePoints(
     if (segmentation.labels[a] >= 0 &&
         segmentation.labels[a] == segmentation.labels[b])
       return;
+    bool is_crease = false;
     if (segmentation.has_normal[a] && segmentation.has_normal[b]) {
       const Eigen::Vector3d delta =
           y.xyz.cast<double>() - x.xyz.cast<double>();
       const auto &nx = segmentation.normals[a];
       const auto &ny = segmentation.normals[b];
-      if (std::abs(nx.dot(ny)) >=
+      const double normal_cos = std::abs(nx.dot(ny));
+      if (normal_cos >=
               std::cos(config.lidar_plane_normal_threshold_rad) &&
           std::abs(nx.dot(delta)) <=
               config.lidar_plane_neighbor_distance_threshold_m &&
           std::abs(ny.dot(delta)) <=
               config.lidar_plane_neighbor_distance_threshold_m)
         return;
+      if (segmentation.labels[a] >= 0 && segmentation.labels[b] >= 0 &&
+          segmentation.labels[a] != segmentation.labels[b] &&
+          normal_cos < std::cos(config.lidar_plane_normal_threshold_rad)) {
+        is_crease = true;
+      }
     }
-    double threshold = std::max(config.lidar_edge_absolute_threshold_m,
-                                config.lidar_edge_relative_threshold *
-                                    std::min(x.range, y.range));
-    const double current_gap = std::abs(x.range - y.range);
-    if (current_gap <= threshold)
-      return;
-    const auto previous_gap = gap(before, a);
-    const auto next_gap = gap(b, after);
-    double local_gap = 0.0;
-    bool has_local_reference = false;
-    if (previous_gap) {
-      local_gap = *previous_gap;
-      has_local_reference = true;
+    if (!is_crease) {
+      double threshold = std::max(config.lidar_edge_absolute_threshold_m,
+                                  config.lidar_edge_relative_threshold *
+                                      std::min(x.range, y.range));
+      const double current_gap = std::abs(x.range - y.range);
+      if (current_gap <= threshold)
+        return;
+      const auto previous_gap = gap(before, a);
+      const auto next_gap = gap(b, after);
+      double local_gap = 0.0;
+      bool has_local_reference = false;
+      if (previous_gap) {
+        local_gap = *previous_gap;
+        has_local_reference = true;
+      }
+      if (next_gap) {
+        local_gap = std::max(local_gap, *next_gap);
+        has_local_reference = true;
+      }
+      if (has_local_reference &&
+          current_gap <
+              config.lidar_edge_minimum_local_contrast_ratio * local_gap)
+        return;
     }
-    if (next_gap) {
-      local_gap = std::max(local_gap, *next_gap);
-      has_local_reference = true;
-    }
-    if (has_local_reference &&
-        current_gap <
-            config.lidar_edge_minimum_local_contrast_ratio * local_gap)
-      return;
     selected[a] = true;
     selected[b] = true;
   };
@@ -1577,11 +1776,19 @@ LidarPlaneSegmentation segmentLidarPlanes(const Scan &scan,
     centroid /= static_cast<double>(cells.size());
     Eigen::Matrix3d covariance = Eigen::Matrix3d::Zero();
     Eigen::Vector3d average_normal = Eigen::Vector3d::Zero();
+    double min_x = std::numeric_limits<double>::infinity();
+    double max_x = -std::numeric_limits<double>::infinity();
+    double min_z = std::numeric_limits<double>::infinity();
+    double max_z = -std::numeric_limits<double>::infinity();
     for (const std::size_t cell : cells) {
-      const Eigen::Vector3d delta =
-          scan.points[cell].xyz.cast<double>() - centroid;
+      const Eigen::Vector3d pt = scan.points[cell].xyz.cast<double>();
+      const Eigen::Vector3d delta = pt - centroid;
       covariance += delta * delta.transpose();
       average_normal += result.normals[cell];
+      min_x = std::min(min_x, pt.x());
+      max_x = std::max(max_x, pt.x());
+      min_z = std::min(min_z, pt.z());
+      max_z = std::max(max_z, pt.z());
     }
     covariance /= static_cast<double>(cells.size());
     Eigen::SelfAdjointEigenSolver<Eigen::Matrix3d> solver(covariance);
@@ -1603,7 +1810,10 @@ LidarPlaneSegmentation segmentLidarPlanes(const Scan &scan,
         std::sqrt(squared_error / static_cast<double>(cells.size()));
     if (rms > config.maximum_lidar_plane_rms_error_m)
       return false;
-    plane = {normal, offset, cells.size(), rms};
+    const double bounding_area = (max_x > min_x && max_z > min_z)
+                                     ? (max_x - min_x) * (max_z - min_z)
+                                     : 0.0;
+    plane = {normal, offset, cells.size(), rms, bounding_area};
     return true;
   };
   std::vector<unsigned char> visited(scan.points.size(), 0);
@@ -1826,6 +2036,170 @@ LidarPlaneSegmentation segmentLidarPlanes(const Scan &scan,
   return result;
 }
 
+DominantPlanes findDominantPlanes(const LidarPlaneSegmentation &segmentation,
+                                 const CalibrationConfig &config) {
+  DominantPlanes result;
+  if (segmentation.planes.empty())
+    return result;
+
+  const double tolerance =
+      config.ground_plane_normal_tolerance_rad > 0.0
+          ? config.ground_plane_normal_tolerance_rad
+          : 0.3490658503988659;
+  const double normal_cosine = std::cos(tolerance);
+  const Eigen::Vector3d gravity =
+      config.lidar_gravity_axis.norm() > 1e-6
+          ? config.lidar_gravity_axis.normalized()
+          : Eigen::Vector3d::UnitY();
+
+  struct HorizPlane {
+    Eigen::Vector3d normal;
+    double offset;
+    std::size_t support;
+    double y_pos;
+    double bounding_area_m2;
+    std::size_t original_index;
+  };
+  std::vector<HorizPlane> horiz_planes;
+
+  for (std::size_t i = 0; i < segmentation.planes.size(); ++i) {
+    const auto &plane = segmentation.planes[i];
+    if (plane.support_points < config.minimum_lidar_plane_points)
+      continue;
+    const double dot_gravity = plane.normal.dot(gravity);
+    if (std::abs(dot_gravity) >= normal_cosine) {
+      Eigen::Vector3d n = plane.normal;
+      double d = plane.offset;
+      if (n.dot(gravity) < 0.0) {
+        n = -n;
+        d = -d;
+      }
+      const double y_pos = -d / std::max(1e-6, n.dot(gravity));
+      horiz_planes.push_back(
+          {n, d, plane.support_points, y_pos, plane.bounding_area_m2, i});
+    }
+  }
+
+  if (horiz_planes.empty())
+    return result;
+
+  // Ground plane candidates must satisfy support >= 200 points and bounding area >= 1.0 m^2
+  std::vector<HorizPlane> ground_candidates;
+  for (const auto &p : horiz_planes) {
+    if (p.support >= 200 && p.bounding_area_m2 >= 1.0) {
+      ground_candidates.push_back(p);
+    }
+  }
+
+  if (!ground_candidates.empty()) {
+    std::sort(ground_candidates.begin(), ground_candidates.end(),
+              [](const HorizPlane &a, const HorizPlane &b) {
+                return a.y_pos > b.y_pos;
+              });
+
+    const double max_y = ground_candidates.front().y_pos;
+    std::size_t best_floor_idx = 0;
+    std::size_t max_floor_support = 0;
+    for (std::size_t i = 0; i < ground_candidates.size(); ++i) {
+      if (ground_candidates[i].y_pos >= max_y - 0.20) {
+        if (ground_candidates[i].support > max_floor_support) {
+          max_floor_support = ground_candidates[i].support;
+          best_floor_idx = i;
+        }
+      }
+    }
+
+    const auto &floor = ground_candidates[best_floor_idx];
+    result.has_ground = true;
+    result.ground_normal = floor.normal;
+    result.ground_offset = floor.offset;
+    result.ground_points = floor.support;
+    result.ground_y = floor.y_pos;
+    result.ground_area_m2 = floor.bounding_area_m2;
+  }
+
+  std::sort(horiz_planes.begin(), horiz_planes.end(),
+            [](const HorizPlane &a, const HorizPlane &b) {
+              return a.y_pos > b.y_pos;
+            });
+
+  const double max_y =
+      result.has_ground ? result.ground_y : horiz_planes.front().y_pos;
+  std::size_t best_ceil_idx = horiz_planes.size();
+  std::size_t max_ceil_support = 0;
+  const double min_y = horiz_planes.back().y_pos;
+  if (max_y - min_y >= 0.50) {
+    for (std::size_t i = 0; i < horiz_planes.size(); ++i) {
+      if (max_y - horiz_planes[i].y_pos >= 0.50 &&
+          horiz_planes[i].y_pos <= min_y + 0.20) {
+        if (horiz_planes[i].support > max_ceil_support) {
+          max_ceil_support = horiz_planes[i].support;
+          best_ceil_idx = i;
+        }
+      }
+    }
+  }
+
+  if (best_ceil_idx < horiz_planes.size()) {
+    const auto &ceil = horiz_planes[best_ceil_idx];
+    result.has_ceiling = true;
+    result.ceiling_normal = -ceil.normal;
+    result.ceiling_offset = -ceil.offset;
+    result.ceiling_points = ceil.support;
+    result.ceiling_y = ceil.y_pos;
+  }
+
+  return result;
+}
+
+GroundEvaluation evaluateGroundConsistency(
+    const Transform &t_camera_lidar,
+    const DominantPlanes &planes,
+    const CalibrationConfig &config) {
+  GroundEvaluation eval;
+  if (!planes.has_ground) {
+    eval.valid = true;
+    return eval;
+  }
+  const Eigen::Vector3d c_lidar =
+      -t_camera_lidar.rotation.transpose() * t_camera_lidar.translation_m;
+  const double h_cam =
+      -(planes.ground_normal.dot(c_lidar)) - planes.ground_offset;
+  eval.height_m = h_cam;
+
+  const Eigen::Vector3d n_cam = t_camera_lidar.rotation * planes.ground_normal;
+  const double cos_tilt = std::clamp(n_cam.y(), -1.0, 1.0);
+  eval.tilt_deg = std::acos(cos_tilt) * kRadToDeg;
+  const double downward_pitch_deg =
+      std::asin(std::clamp(n_cam.z(), -1.0, 1.0)) * kRadToDeg;
+  eval.downward_pitch_deg = downward_pitch_deg;
+
+  if (config.enable_ground_plane_constraint) {
+    if (h_cam < config.minimum_camera_ground_height_m ||
+        h_cam > config.maximum_camera_ground_height_m) {
+      eval.valid = false;
+    }
+    if (cos_tilt <= 0.0 ||
+        eval.tilt_deg > config.maximum_camera_ground_tilt_deg) {
+      eval.valid = false;
+    }
+    if (downward_pitch_deg < config.minimum_camera_downward_pitch_deg ||
+        downward_pitch_deg > config.maximum_camera_downward_pitch_deg) {
+      eval.valid = false;
+    }
+  }
+  return eval;
+}
+
+namespace {
+GroundEvaluation evaluateGroundConsistency(
+    const Parameters &parameters,
+    const DominantPlanes &planes,
+    const CalibrationConfig &config) {
+  return evaluateGroundConsistency(fromParameters(parameters), planes, config);
+}
+} // namespace
+
 std::vector<StructuralLineSegment3d> extractLidarPlaneIntersectionSegments(
     const Scan &scan, const LidarPlaneSegmentation &segmentation,
     const CalibrationConfig &config,
@@ -1876,6 +2250,14 @@ std::vector<StructuralLineSegment3d> extractLidarPlaneIntersectionSegments(
                     static_cast<std::uint32_t>(neighbor_column)));
         }
     }
+
+  const DominantPlanes dominant = findDominantPlanes(segmentation, config);
+  const Eigen::Vector3d gravity =
+      config.lidar_gravity_axis.norm() > 1e-6
+          ? config.lidar_gravity_axis.normalized()
+          : Eigen::Vector3d::UnitY();
+  const double vert_cos = std::cos(config.ground_plane_normal_tolerance_rad);
+  const double horiz_sin = std::sin(config.ground_plane_normal_tolerance_rad);
 
   std::vector<StructuralLineSegment3d> segments;
   for (const auto &[pair, support] : boundaries) {
@@ -1950,7 +2332,84 @@ std::vector<StructuralLineSegment3d> extractLidarPlaneIntersectionSegments(
     diagnostic.segment_length_m = (b - a).norm();
     if (diagnostic.segment_length_m >=
         config.minimum_lidar_structural_segment_length_m) {
-      segments.push_back({a, b});
+      // Check 3-plane corner junction
+      bool is_corner_junction = false;
+      for (const std::size_t cell : cells) {
+        const std::uint32_t row = cell / scan.config.columns;
+        const std::uint32_t col = cell % scan.config.columns;
+        for (int dr = -2; dr <= 2 && !is_corner_junction; ++dr) {
+          for (int dc = -2; dc <= 2 && !is_corner_junction; ++dc) {
+            const int nr = static_cast<int>(row) + dr;
+            const int nc = static_cast<int>(col) + dc;
+            if (nr >= 0 && nr < static_cast<int>(scan.config.rows) &&
+                nc >= 0 && nc < static_cast<int>(scan.config.columns)) {
+              const std::size_t n_idx =
+                  static_cast<std::size_t>(nr) * scan.config.columns + nc;
+              const int lbl = segmentation.labels[n_idx];
+              if (lbl >= 0 && lbl != pair.first && lbl != pair.second) {
+                const auto &third_plane =
+                    segmentation.planes[static_cast<std::size_t>(lbl)];
+                const double dot1 =
+                    std::abs(third_plane.normal.dot(first.normal));
+                const double dot2 =
+                    std::abs(third_plane.normal.dot(second.normal));
+                if (dot1 <= std::cos(config.minimum_plane_intersection_angle_rad) &&
+                    dot2 <= std::cos(config.minimum_plane_intersection_angle_rad)) {
+                  is_corner_junction = true;
+                }
+              }
+            }
+          }
+        }
+        if (is_corner_junction)
+          break;
+      }
+
+      const double gravity_alignment = std::abs(direction.dot(gravity));
+      const bool is_vertical = (gravity_alignment >= vert_cos);
+      const bool is_horizontal = (gravity_alignment <= horiz_sin);
+      const Eigen::Vector3d midpoint = 0.5 * (a + b);
+
+      double w_height = 1.0;
+      if (dominant.has_ceiling) {
+        const double delta_y_ceil = midpoint.y() - dominant.ceiling_y;
+        const double room_height =
+            dominant.has_ground ? (dominant.ground_y - dominant.ceiling_y) : 2.5;
+        const double effective_height = std::max(0.5, room_height);
+        const double eta_ceil =
+            std::clamp(delta_y_ceil / effective_height, 0.0, 1.0);
+        if (is_horizontal) {
+          if (eta_ceil <= 0.15 || delta_y_ceil <= 0.30) {
+            w_height = config.ceiling_suppression_factor;
+          } else if (dominant.has_ground &&
+                     (eta_ceil >= 0.85 || midpoint.y() >= dominant.ground_y - 0.30)) {
+            w_height = 1.30;
+          }
+        } else if (is_vertical) {
+          w_height = 1.0 + 0.30 * eta_ceil;
+        }
+      }
+
+      double w_dir = 1.0;
+      if (is_vertical) {
+        w_dir = 1.20 + 0.40 * gravity_alignment;
+        if (is_corner_junction)
+          w_dir *= config.vertical_corner_boost_factor;
+      } else if (is_corner_junction) {
+        w_dir *= 1.30;
+      }
+
+      const double w_len =
+          std::clamp(diagnostic.segment_length_m / 0.50, 0.60, 2.0);
+      const double w_asym = w_len * w_dir * w_height;
+      double confidence = 1.0;
+      if (config.enable_asymmetric_line_weighting) {
+        confidence = std::clamp(
+            1.0 + (w_asym - 1.0) * config.asymmetric_feature_weight_factor,
+            0.10, 5.0);
+      }
+      segments.push_back({a, b, StructuralLineSource::PlaneIntersection,
+                          confidence, 1, true, first.normal, second.normal});
       diagnostic.accepted = true;
       diagnostic.reason = "ACCEPTED";
     } else {
@@ -1974,7 +2433,7 @@ std::vector<StructuralLineSegment3d> extractLidarPlaneBoundarySegments(
     throw std::invalid_argument("Plane segmentation does not match scan");
   const double normal_cosine =
       std::cos(config.lidar_plane_normal_threshold_rad);
-  return extractGridBoundaryLineSegments(
+  auto segments = extractGridBoundaryLineSegments(
       scan, config, StructuralLineSource::PlaneBoundary,
       config.plane_boundary_confidence,
       [&](const Point &a, const Point &b, std::size_t a_index,
@@ -1997,6 +2456,47 @@ std::vector<StructuralLineSegment3d> extractLidarPlaneBoundarySegments(
           return nullptr;
         return &scan.points[plane_index];
       });
+
+  if (config.enable_asymmetric_line_weighting) {
+    const DominantPlanes dominant = findDominantPlanes(segmentation, config);
+    const Eigen::Vector3d gravity =
+        config.lidar_gravity_axis.norm() > 1e-6
+            ? config.lidar_gravity_axis.normalized()
+            : Eigen::Vector3d::UnitY();
+    const double vert_cos = std::cos(config.ground_plane_normal_tolerance_rad);
+    const double horiz_sin = std::sin(config.ground_plane_normal_tolerance_rad);
+    for (auto &seg : segments) {
+      const Eigen::Vector3d vec = seg.b - seg.a;
+      const double len = vec.norm();
+      if (len <= 1e-6)
+        continue;
+      const Eigen::Vector3d dir = vec / len;
+      const double grav_align = std::abs(dir.dot(gravity));
+      const bool is_vert = (grav_align >= vert_cos);
+      const bool is_horiz = (grav_align <= horiz_sin);
+      const Eigen::Vector3d mid = 0.5 * (seg.a + seg.b);
+      double w_height = 1.0;
+      if (dominant.has_ceiling) {
+        const double delta_y_ceil = mid.y() - dominant.ceiling_y;
+        const double room_height =
+            dominant.has_ground ? (dominant.ground_y - dominant.ceiling_y) : 2.5;
+        const double eta_ceil =
+            std::clamp(delta_y_ceil / std::max(0.5, room_height), 0.0, 1.0);
+        if (is_horiz && (eta_ceil <= 0.15 || delta_y_ceil <= 0.30)) {
+          w_height = config.ceiling_suppression_factor;
+        } else if (is_vert) {
+          w_height = 1.0 + 0.30 * eta_ceil;
+        }
+      }
+      const double w_dir = is_vert ? (1.20 + 0.30 * grav_align) : 1.0;
+      const double w_asym = w_dir * w_height;
+      seg.confidence = std::clamp(
+          seg.confidence *
+              (1.0 + (w_asym - 1.0) * config.asymmetric_feature_weight_factor),
+          0.10, 5.0);
+    }
+  }
+  return segments;
 }
 
 std::vector<StructuralLineSegment3d>
@@ -2181,11 +2681,14 @@ SignalNmiPoseScore evaluateSignalNmiPose(
 
 std::vector<PoseSceneMetrics> evaluateCalibrationPoseScenes(
     const std::vector<CalibrationObservation> &observations,
-    const Transform &t_camera_lidar, const CalibrationConfig &config) {
+    const Transform &t_camera_lidar, const CalibrationConfig &config,
+    const Transform *manhattan_feature_prior) {
   std::vector<PoseSceneMetrics> results(observations.size());
   if (observations.empty())
     return results;
   const Parameters parameters = toParameters(t_camera_lidar);
+  const Transform &feature_prior =
+      manhattan_feature_prior ? *manhattan_feature_prior : t_camera_lidar;
   CalibrationConfig signal_config = config;
   signal_config.range_geometry_nid_weight = 1.0;
   signal_config.normal_geometry_nid_weight = 0.0;
@@ -2252,7 +2755,7 @@ std::vector<PoseSceneMetrics> evaluateCalibrationPoseScenes(
     const auto manhattan = evaluateManhattanDirections(
         parameters,
         buildManhattanImageFeature(structural_image, observation.camera,
-                                   t_camera_lidar, config),
+                                   feature_prior, config),
         buildManhattanLidarFeature(segmentations[i], config), config);
     const auto signal_features =
         extractCorrectedSignalFeatures(observation.scan, config);
@@ -2270,9 +2773,11 @@ std::vector<PoseSceneMetrics> evaluateCalibrationPoseScenes(
             ? static_cast<double>(edge.projected) / edge.visible
             : 0.0;
     metrics.mean_edge_distance_px = edge.mean;
+    metrics.edge_objective = edge.normalized_squared;
     metrics.nid_projected_points = geometry_nid.projected;
     metrics.nid_active_spatial_cells = geometry_nid.active_spatial_cells;
     metrics.geometry_nid = geometry_nid.score;
+    metrics.geometry_nid_objective = geometry_nid.squared_score;
     metrics.range_nid = geometry_nid.range_score;
     metrics.normal_nid = geometry_nid.normal_score;
     metrics.structural_visible_segments = structural.visible;
@@ -2280,8 +2785,27 @@ std::vector<PoseSceneMetrics> evaluateCalibrationPoseScenes(
     metrics.horizontal_structural_matches = structural.horizontal_projected;
     metrics.vertical_structural_matches = structural.vertical_projected;
     metrics.structural_objective = structural.normalized_squared;
+    metrics.structural_score_weight = structural.score_weight;
+    metrics.total_explained_structural_length =
+        structural.total_explained_structural_length;
+    metrics.total_visible_structural_length =
+        structural.total_visible_structural_length;
+    metrics.tesl_ratio =
+        structural.total_visible_structural_length > 1e-6
+            ? (structural.total_explained_structural_length /
+               structural.total_visible_structural_length)
+            : 0.0;
+    metrics.asymmetric_structural_weight =
+        structural.asymmetric_structural_weight;
+    const auto dominant_plane = findDominantPlanes(segmentations[i], config);
+    const auto ground_eval =
+        evaluateGroundConsistency(parameters, dominant_plane, config);
+    metrics.ground_normal_valid = ground_eval.valid;
+    metrics.ground_height_m = ground_eval.height_m;
+    metrics.ground_tilt_deg = ground_eval.tilt_deg;
     metrics.manhattan_vertical_inliers = manhattan.vertical_inliers;
     metrics.manhattan_horizontal_axes = manhattan.horizontal_axes;
+    metrics.manhattan_objective = manhattan.score;
     metrics.manhattan_vertical_error_deg =
         std::isfinite(manhattan.vertical_error_rad)
             ? manhattan.vertical_error_rad * kRadToDeg
@@ -2289,8 +2813,100 @@ std::vector<PoseSceneMetrics> evaluateCalibrationPoseScenes(
     metrics.signal_projected_points = signal.projected;
     metrics.signal_active_spatial_cells = signal.active_spatial_cells;
     metrics.signal_nmi = signal.score;
+    metrics.signal_nmi_objective = signal.squared_score;
   }
   return results;
+}
+
+PoseObjectiveMetrics summarizeCalibrationPoseScenes(
+    const std::vector<PoseSceneMetrics> &scene_metrics,
+    const Transform &t_camera_lidar, const CalibrationConfig &config,
+    std::size_t reference_visible_edge_points,
+    std::size_t reference_nid_projected_points,
+    std::size_t reference_edge_active_spatial_cells) {
+  PoseObjectiveMetrics summary;
+  summary.scene_count = scene_metrics.size();
+  if (scene_metrics.empty())
+    return summary;
+
+  double edge_sum = 0.0;
+  double nid_sum = 0.0;
+  double signal_sum = 0.0;
+  double structural_sum = 0.0;
+  double structural_weight = 0.0;
+  double manhattan_sum = 0.0;
+  std::size_t manhattan_scenes = 0;
+  for (const auto &scene : scene_metrics) {
+    summary.visible_edge_points += scene.visible_edge_points;
+    summary.nid_projected_points += scene.nid_projected_points;
+    summary.edge_active_spatial_cells += scene.edge_active_spatial_cells;
+    if (scene.visible_edge_points > 0)
+      edge_sum += scene.edge_objective * scene.visible_edge_points;
+    nid_sum += scene.geometry_nid_objective;
+    signal_sum += scene.signal_nmi_objective;
+    if (scene.structural_score_weight > 0.0) {
+      structural_sum +=
+          scene.structural_objective * scene.structural_score_weight;
+      structural_weight += scene.structural_score_weight;
+    }
+    if (scene.manhattan_vertical_inliers > 0) {
+      manhattan_sum += scene.manhattan_objective;
+      ++manhattan_scenes;
+    }
+  }
+
+  if (summary.visible_edge_points > 0)
+    summary.edge_objective =
+        edge_sum / static_cast<double>(summary.visible_edge_points);
+  summary.geometry_nid_objective =
+      nid_sum / static_cast<double>(scene_metrics.size());
+  summary.signal_nmi_objective =
+      signal_sum / static_cast<double>(scene_metrics.size());
+  summary.structural_objective =
+      structural_weight > 0.0 ? structural_sum / structural_weight : 1.0;
+  summary.manhattan_objective =
+      manhattan_scenes > 0
+          ? manhattan_sum / static_cast<double>(manhattan_scenes)
+          : 1.0;
+
+  const Parameters parameters = toParameters(t_camera_lidar);
+  summary.direction_prior_objective =
+      directionPriorObjective(parameters, config);
+  summary.edge_coverage_ratio =
+      reference_visible_edge_points > 0
+          ? static_cast<double>(summary.visible_edge_points) /
+                reference_visible_edge_points
+          : 0.0;
+  summary.nid_coverage_ratio =
+      reference_nid_projected_points > 0
+          ? static_cast<double>(summary.nid_projected_points) /
+                reference_nid_projected_points
+          : 0.0;
+  summary.edge_spatial_coverage_ratio =
+      reference_edge_active_spatial_cells > 0
+          ? static_cast<double>(summary.edge_active_spatial_cells) /
+                reference_edge_active_spatial_cells
+          : 0.0;
+  summary.coverage_objective =
+      (std::pow(1.0 - summary.edge_coverage_ratio, 2.0) +
+       std::pow(1.0 - summary.nid_coverage_ratio, 2.0) +
+       std::pow(1.0 - summary.edge_spatial_coverage_ratio, 2.0)) /
+      3.0;
+
+  Evaluation edge;
+  edge.normalized_squared = summary.edge_objective;
+  NidEvaluation nid;
+  nid.squared_score = summary.geometry_nid_objective;
+  NidEvaluation signal;
+  signal.squared_score = summary.signal_nmi_objective;
+  Evaluation structural;
+  structural.normalized_squared = summary.structural_objective;
+  ManhattanEvaluation manhattan;
+  manhattan.score = summary.manhattan_objective;
+  summary.composite_objective = compositeObjective(
+      edge, nid, signal, structural, manhattan, config,
+      summary.direction_prior_objective, summary.coverage_objective);
+  return summary;
 }
 
 CalibrationResult calibrateExtrinsic(const cv::Mat &bgr,
@@ -2383,10 +2999,19 @@ CalibrationResult calibrateExtrinsic(const cv::Mat &bgr,
     result.solver_summary = summary.BriefReport();
     const PoseError prior_update =
         calculatePoseError(candidate, mechanical_prior);
+    const auto segmentation = segmentLidarPlanes(scan, config);
+    const auto dominant_plane = findDominantPlanes(segmentation, config);
+    const auto ground_eval =
+        evaluateGroundConsistency(params, dominant_plane, config);
+    result.metrics.ground_normal_valid = ground_eval.valid;
+    result.metrics.ground_height_m = ground_eval.height_m;
+    result.metrics.ground_tilt_deg = ground_eval.tilt_deg;
     if (!summary.IsSolutionUsable())
       result.reason_code = "OPTIMIZER_FAILED";
     else if (summary.termination_type == ceres::NO_CONVERGENCE)
       result.reason_code = "OPTIMIZER_NOT_CONVERGED";
+    else if (config.enable_ground_plane_constraint && !ground_eval.valid)
+      result.reason_code = "GEOMETRY_GROUND_INCONSISTENT";
     else if (result.metrics.projected_ratio < config.minimum_projected_ratio)
       result.reason_code = "OVERLAP_INSUFFICIENT";
     else if (final.mean > config.maximum_mean_edge_distance_px)
@@ -2433,6 +3058,7 @@ CalibrationResult calibrateExtrinsicMultiScene(
     StructuralImageFeature structural_image;
     ManhattanImageFeature manhattan_image;
     ManhattanLidarFeature manhattan_lidar;
+    DominantPlanes dominant_planes;
     std::vector<Eigen::Vector3d> points;
     std::vector<Eigen::Vector3d> cloud;
     std::vector<GeometryFeature> geometry;
@@ -2549,7 +3175,8 @@ CalibrationResult calibrateExtrinsicMultiScene(
     }
     const double structural_component_weight =
         config.structural_direction_weight +
-        config.structural_endpoint_weight + config.structural_overlap_weight;
+        config.structural_endpoint_weight + config.structural_overlap_weight +
+        config.structural_normal_weight;
     if (config.structural_line_weight > 0.0 &&
         (config.minimum_lidar_structural_segment_points < 2 ||
          config.minimum_lidar_structural_segment_length_m <= 0.0 ||
@@ -2654,10 +3281,12 @@ CalibrationResult calibrateExtrinsicMultiScene(
       for (const auto &point : observation.scan.points)
         if (point.valid())
           cloud.push_back(point.xyz.cast<double>());
+      const auto dominant_planes =
+          findDominantPlanes(plane_segmentation, config);
       prepared.push_back({observation.camera, std::move(distance),
                           std::move(camera_feature),
                           std::move(camera_intensity), structural,
-                          manhattan_image, manhattan_lidar,
+                          manhattan_image, manhattan_lidar, dominant_planes,
                           std::move(points), std::move(cloud),
                           std::move(geometry), std::move(signal),
                           std::move(structural_segments),
@@ -2737,6 +3366,9 @@ CalibrationResult calibrateExtrinsicMultiScene(
       aggregate.normalized_squared = 0.0;
       aggregate.horizontal_normalized_squared = 0.0;
       aggregate.vertical_normalized_squared = 0.0;
+      aggregate.total_explained_structural_length = 0.0;
+      aggregate.total_visible_structural_length = 0.0;
+      aggregate.asymmetric_structural_weight = 0.0;
       for (const auto &item : prepared) {
         const auto visibility = config.enable_visibility_filter
                                     ? buildVisibilityBuffer(
@@ -2756,6 +3388,12 @@ CalibrationResult calibrateExtrinsicMultiScene(
               current.normalized_squared * current.score_weight;
           aggregate.score_weight += current.score_weight;
         }
+        aggregate.total_explained_structural_length +=
+            current.total_explained_structural_length;
+        aggregate.total_visible_structural_length +=
+            current.total_visible_structural_length;
+        aggregate.asymmetric_structural_weight +=
+            current.asymmetric_structural_weight;
         aggregate.projected += current.projected;
         aggregate.in_frame += current.in_frame;
         aggregate.visible += current.visible;
@@ -2968,6 +3606,13 @@ CalibrationResult calibrateExtrinsicMultiScene(
       double nid_coverage_ratio = 1.0;
       double edge_spatial_coverage_ratio = 1.0;
       double coverage_objective = 0.0;
+      bool ground_normal_valid = true;
+      double ground_height_m = 0.0;
+      double ground_tilt_deg = 0.0;
+      double total_explained_structural_length = 0.0;
+      double total_visible_structural_length = 0.0;
+      double tesl_ratio = 0.0;
+      double asymmetric_structural_weight = 0.0;
     };
     std::vector<Start> starts;
     if (config.coarse_yaw_span_rad > 0.0 || config.use_coarse_yaw_bounds) {
@@ -2999,11 +3644,30 @@ CalibrationResult calibrateExtrinsicMultiScene(
             evaluate_lines_all(candidate_parameters, active_initial_intrinsics);
         const ManhattanEvaluation manhattan =
             evaluate_manhattan_all(candidate_parameters);
+        bool candidate_ground_valid = true;
+        double candidate_ground_height = 0.0;
+        double candidate_ground_tilt = 0.0;
+        int candidate_ground_count = 0;
+        for (const auto &item : prepared) {
+          if (item.dominant_planes.has_ground) {
+            const auto g_eval = evaluateGroundConsistency(
+                candidate_parameters, item.dominant_planes, config);
+            if (!g_eval.valid)
+              candidate_ground_valid = false;
+            candidate_ground_height += g_eval.height_m;
+            candidate_ground_tilt += g_eval.tilt_deg;
+            ++candidate_ground_count;
+          }
+        }
+        if (candidate_ground_count > 0) {
+          candidate_ground_height /= candidate_ground_count;
+          candidate_ground_tilt /= candidate_ground_count;
+        }
         starts.push_back({candidate_parameters, offset,
                           compositeObjective(
                               edge, nid, signal_nmi, line, manhattan, config,
                               directionPriorObjective(candidate_parameters,
-                                                      config)),
+                              config)),
                           edge.in_frame, edge.visible, edge.occluded,
                           nid.projected, signal_nmi.projected,
                           edge.normalized_squared,
@@ -3017,9 +3681,39 @@ CalibrationResult calibrateExtrinsicMultiScene(
                           line.horizontal_projected,
                           line.vertical_projected,
                           edge.active_spatial_cells,
-                          line.visible});
+                          line.visible,
+                          1.0, 1.0, 1.0, 0.0,
+                          candidate_ground_valid,
+                          candidate_ground_height,
+                          candidate_ground_tilt,
+                          line.total_explained_structural_length,
+                          line.total_visible_structural_length,
+                          line.total_visible_structural_length > 1e-6
+                              ? (line.total_explained_structural_length /
+                                 line.total_visible_structural_length)
+                              : 0.0,
+                          line.asymmetric_structural_weight});
       }
     } else {
+      bool initial_ground_valid = true;
+      double initial_ground_height = 0.0;
+      double initial_ground_tilt = 0.0;
+      int initial_ground_count = 0;
+      for (const auto &item : prepared) {
+        if (item.dominant_planes.has_ground) {
+          const auto g_eval =
+              evaluateGroundConsistency(prior, item.dominant_planes, config);
+          if (!g_eval.valid)
+            initial_ground_valid = false;
+          initial_ground_height += g_eval.height_m;
+          initial_ground_tilt += g_eval.tilt_deg;
+          ++initial_ground_count;
+        }
+      }
+      if (initial_ground_count > 0) {
+        initial_ground_height /= initial_ground_count;
+        initial_ground_tilt /= initial_ground_count;
+      }
       starts.push_back({prior, 0.0, result.metrics.initial_composite_objective,
                         initial_edge.in_frame, initial_edge.visible,
                         initial_edge.occluded, initial_nid.projected,
@@ -3035,7 +3729,18 @@ CalibrationResult calibrateExtrinsicMultiScene(
                         initial_line.horizontal_projected,
                         initial_line.vertical_projected,
                         initial_edge.active_spatial_cells,
-                        initial_line.visible});
+                        initial_line.visible,
+                        1.0, 1.0, 1.0, 0.0,
+                        initial_ground_valid,
+                        initial_ground_height,
+                        initial_ground_tilt,
+                        initial_line.total_explained_structural_length,
+                        initial_line.total_visible_structural_length,
+                        initial_line.total_visible_structural_length > 1e-6
+                            ? (initial_line.total_explained_structural_length /
+                               initial_line.total_visible_structural_length)
+                            : 0.0,
+                        initial_line.asymmetric_structural_weight});
     }
     const auto maximum_start = [](const std::vector<Start> &values,
                                   auto member) {
@@ -3045,18 +3750,27 @@ CalibrationResult calibrateExtrinsicMultiScene(
       return maximum;
     };
     const std::size_t maximum_edge_visible =
-        maximum_start(starts, &Start::edge_visible);
+        config.global_reference_visible_edge_points > 0
+            ? std::max(config.global_reference_visible_edge_points,
+                       maximum_start(starts, &Start::edge_visible))
+            : maximum_start(starts, &Start::edge_visible);
     const std::size_t maximum_nid_projected =
-        maximum_start(starts, &Start::nid_projected);
+        config.global_reference_nid_projected_points > 0
+            ? std::max(config.global_reference_nid_projected_points,
+                       maximum_start(starts, &Start::nid_projected))
+            : maximum_start(starts, &Start::nid_projected);
     const std::size_t maximum_edge_active_cells =
-        maximum_start(starts, &Start::edge_active_spatial_cells);
+        config.global_reference_edge_active_cells > 0
+            ? std::max(config.global_reference_edge_active_cells,
+                       maximum_start(starts, &Start::edge_active_spatial_cells))
+            : maximum_start(starts, &Start::edge_active_spatial_cells);
     result.coarse_orientation_scores.reserve(starts.size());
     for (auto &start : starts) {
       // The scan covers 360 degrees while a camera sees only one sector, so a
       // ratio against the full cloud rejects physically valid orientations.
       // Require enough absolute overlap for both independent objectives.
       const std::size_t minimum_edge_overlap =
-          std::max<std::size_t>(100, config.minimum_lidar_edge_points);
+          config.minimum_lidar_edge_points;
       const std::size_t minimum_nid_overlap =
           config.minimum_nid_projected_points * prepared.size();
       const std::size_t minimum_signal_overlap =
@@ -3093,7 +3807,8 @@ CalibrationResult calibrateExtrinsicMultiScene(
           start.edge_spatial_coverage_ratio >=
               config.minimum_relative_edge_spatial_coverage &&
           (config.signal_nmi_weight <= 0.0 ||
-           start.signal_nmi_projected >= minimum_signal_overlap);
+           start.signal_nmi_projected >= minimum_signal_overlap) &&
+          (!config.enable_ground_plane_constraint || start.ground_normal_valid);
       if (!overlap_valid)
         start.objective = std::numeric_limits<double>::infinity();
       result.coarse_orientation_scores.push_back(
@@ -3110,7 +3825,11 @@ CalibrationResult calibrateExtrinsicMultiScene(
            start.vertical_line_segments, start.edge_active_spatial_cells,
            start.structural_visible_segments, start.edge_coverage_ratio,
            start.nid_coverage_ratio, start.edge_spatial_coverage_ratio,
-           start.coverage_objective, overlap_valid});
+           start.coverage_objective, overlap_valid,
+           start.ground_normal_valid, start.ground_height_m,
+           start.ground_tilt_deg, start.total_explained_structural_length,
+           start.total_visible_structural_length, start.tesl_ratio,
+           start.asymmetric_structural_weight});
     }
     std::sort(starts.begin(), starts.end(), [](const Start &a, const Start &b) {
       return a.objective < b.objective;
@@ -3409,25 +4128,43 @@ CalibrationResult calibrateExtrinsicMultiScene(
                                                final_edge.projected) /
                                                final_edge.visible
                                          : 0.0;
-    result.metrics.max_coarse_visible_edge_points = maximum_edge_visible;
-    result.metrics.max_coarse_nid_projected_points = maximum_nid_projected;
-    result.metrics.max_coarse_edge_active_spatial_cells =
-        maximum_edge_active_cells;
+    const std::size_t final_max_edge =
+        config.global_reference_visible_edge_points > 0
+            ? std::max(config.global_reference_visible_edge_points,
+                       maximum_edge_visible)
+            : maximum_edge_visible;
+    const std::size_t final_max_nid =
+        config.global_reference_nid_projected_points > 0
+            ? std::max(config.global_reference_nid_projected_points,
+                       maximum_nid_projected)
+            : maximum_nid_projected;
+    const std::size_t final_max_cells =
+        config.global_reference_edge_active_cells > 0
+            ? std::max(config.global_reference_edge_active_cells,
+                       maximum_edge_active_cells)
+            : maximum_edge_active_cells;
+
+    result.metrics.max_coarse_visible_edge_points = final_max_edge;
+    result.metrics.max_coarse_nid_projected_points = final_max_nid;
+    result.metrics.max_coarse_edge_active_spatial_cells = final_max_cells;
     result.metrics.edge_active_spatial_cells = final_edge.active_spatial_cells;
     result.metrics.edge_coverage_ratio =
-        maximum_edge_visible > 0
-            ? static_cast<double>(final_edge.visible) / maximum_edge_visible
+        final_max_edge > 0
+            ? static_cast<double>(final_edge.visible) / final_max_edge
             : 0.0;
     result.metrics.nid_coverage_ratio =
-        maximum_nid_projected > 0
-            ? static_cast<double>(final_nid.projected) /
-                  maximum_nid_projected
+        final_max_nid > 0
+            ? static_cast<double>(final_nid.projected) / final_max_nid
             : 0.0;
     result.metrics.edge_spatial_coverage_ratio =
-        maximum_edge_active_cells > 0
+        final_max_cells > 0
             ? static_cast<double>(final_edge.active_spatial_cells) /
-                  maximum_edge_active_cells
+                  final_max_cells
             : 0.0;
+    result.metrics.global_edge_coverage_ratio =
+        result.metrics.edge_coverage_ratio;
+    result.metrics.global_nid_coverage_ratio =
+        result.metrics.nid_coverage_ratio;
     result.metrics.coverage_objective =
         (std::pow(1.0 - result.metrics.edge_coverage_ratio, 2.0) +
          std::pow(1.0 - result.metrics.nid_coverage_ratio, 2.0) +
@@ -3524,10 +4261,68 @@ CalibrationResult calibrateExtrinsicMultiScene(
         config.minimum_nid_projected_points * observations.size();
     const std::size_t minimum_signal_projection =
         config.minimum_signal_nmi_projected_points * observations.size();
+    bool final_ground_valid = true;
+    double final_ground_height = 0.0;
+    double final_ground_tilt = 0.0;
+    int final_ground_count = 0;
+    for (const auto &item : prepared) {
+      if (item.dominant_planes.has_ground) {
+        const auto g_eval =
+            evaluateGroundConsistency(params, item.dominant_planes, config);
+        if (!g_eval.valid)
+          final_ground_valid = false;
+        final_ground_height += g_eval.height_m;
+        final_ground_tilt += g_eval.tilt_deg;
+        ++final_ground_count;
+      }
+    }
+    if (final_ground_count > 0) {
+      result.metrics.ground_normal_valid = final_ground_valid;
+      result.metrics.ground_height_m = final_ground_height / final_ground_count;
+      result.metrics.ground_tilt_deg = final_ground_tilt / final_ground_count;
+    } else {
+      result.metrics.ground_normal_valid = true;
+    }
+    result.metrics.total_explained_structural_length =
+        final_line.total_explained_structural_length;
+    result.metrics.total_visible_structural_length =
+        final_line.total_visible_structural_length;
+    result.metrics.tesl_ratio =
+        final_line.total_visible_structural_length > 1e-6
+            ? (final_line.total_explained_structural_length /
+               final_line.total_visible_structural_length)
+            : 0.0;
+    result.metrics.asymmetric_structural_weight =
+        final_line.asymmetric_structural_weight;
+
+    const std::size_t num_scenes = observations.size();
+    const bool edge_pass =
+        (config.minimum_absolute_visible_edge_points_per_scene == 0) ||
+        (final_edge.visible >=
+         config.minimum_absolute_visible_edge_points_per_scene * num_scenes);
+    const bool nid_pass =
+        (config.minimum_absolute_nid_points_per_scene == 0) ||
+        (final_nid.projected >=
+         config.minimum_absolute_nid_points_per_scene * num_scenes);
+    const bool tesl_pass =
+        (config.minimum_explained_structural_ratio <= 0.0) ||
+        (final_line.total_visible_structural_length <= 1e-6) ||
+        (result.metrics.tesl_ratio >=
+         config.minimum_explained_structural_ratio);
+    const bool coverage_pass =
+        (config.minimum_global_coverage_ratio <= 0.0) ||
+        (result.metrics.edge_coverage_ratio >=
+         config.minimum_global_coverage_ratio);
+
+    result.metrics.absolute_support_pass =
+        edge_pass && nid_pass && tesl_pass && coverage_pass;
+
     if (!summary.IsSolutionUsable())
       result.reason_code = "OPTIMIZER_FAILED";
     else if (summary.termination_type == ceres::NO_CONVERGENCE)
       result.reason_code = "OPTIMIZER_NOT_CONVERGED";
+    else if (config.enable_ground_plane_constraint && !final_ground_valid)
+      result.reason_code = "GEOMETRY_GROUND_INCONSISTENT";
     else if (config.normalized_information_distance_weight > 0.0 &&
              final_nid.projected < minimum_nid_projection)
       result.reason_code = "NID_OVERLAP_INSUFFICIENT";
@@ -3564,8 +4359,9 @@ CalibrationResult calibrateExtrinsicMultiScene(
              final_line.projected <
                  config.minimum_projected_structural_segments)
       result.reason_code = "STRUCTURAL_OVERLAP_INSUFFICIENT";
-    else if (result.metrics.multistart_objective_margin <
-             config.minimum_multistart_objective_margin)
+    else if (starts.size() > 1 &&
+             result.metrics.multistart_objective_margin <
+                 config.minimum_multistart_objective_margin)
       result.reason_code = "MULTISTART_AMBIGUOUS";
     else if (result.metrics.projected_ratio < config.minimum_projected_ratio)
       result.reason_code = "OVERLAP_INSUFFICIENT";
@@ -3574,8 +4370,10 @@ CalibrationResult calibrateExtrinsicMultiScene(
     else if (result.metrics.objective_improvement_ratio <
              config.minimum_objective_improvement_ratio)
       result.reason_code = "OBJECTIVE_IMPROVEMENT_INSUFFICIENT";
-    else if (result.metrics.nid_improvement_ratio <
-             config.minimum_nid_improvement_ratio)
+    else if (config.minimum_nid_improvement_ratio > 0.0 &&
+             starts.size() > 1 &&
+             result.metrics.nid_improvement_ratio <
+                 config.minimum_nid_improvement_ratio)
       result.reason_code = "NID_IMPROVEMENT_INSUFFICIENT";
     else if (config.signal_nmi_weight > 0.0 &&
              result.metrics.signal_nmi_improvement_ratio <
@@ -3602,6 +4400,64 @@ CalibrationResult calibrateExtrinsicMultiScene(
                                   std::chrono::steady_clock::now() - started)
                                   .count();
   return finish();
+}
+
+MultiCriteriaConfidence evaluateMultiCriteriaConfidence(
+    const CalibrationResult &result, double training_scene_pass_ratio,
+    const CalibrationConfig &config) {
+  MultiCriteriaConfidence conf;
+  conf.scene_validation_score = std::clamp(training_scene_pass_ratio, 0.0, 1.0);
+
+  if (!config.enable_ground_plane_constraint) {
+    conf.ground_geometry_score = 1.0;
+  } else if (!result.metrics.ground_normal_valid) {
+    conf.ground_geometry_score = 0.0;
+  } else {
+    const double tilt_factor =
+        1.0 - std::clamp(result.metrics.ground_tilt_deg / 85.0, 0.0, 1.0);
+    const double height_ok =
+        (result.metrics.ground_height_m >=
+             config.minimum_camera_ground_height_m &&
+         result.metrics.ground_height_m <=
+             config.maximum_camera_ground_height_m)
+            ? 1.0
+            : 0.0;
+    conf.ground_geometry_score = height_ok * (0.5 + 0.5 * tilt_factor);
+  }
+
+  const double vis_length = result.metrics.total_visible_structural_length;
+  const double exp_length = result.metrics.total_explained_structural_length;
+  if (vis_length > 1e-6) {
+    const double tesl_ratio = std::clamp(exp_length / vis_length, 0.0, 1.0);
+    conf.tesl_score = tesl_ratio;
+  } else {
+    conf.tesl_score = 0.0;
+  }
+
+  const double nid_val = (result.metrics.final_nid >= 0.0 &&
+                          result.metrics.final_nid <= 1.0)
+                             ? (1.0 - result.metrics.final_nid)
+                             : 0.0;
+  const double edge_cov = result.metrics.global_edge_coverage_ratio > 0.0
+                              ? result.metrics.global_edge_coverage_ratio
+                              : result.metrics.edge_coverage_ratio;
+  const double nid_cov = result.metrics.global_nid_coverage_ratio > 0.0
+                             ? result.metrics.global_nid_coverage_ratio
+                             : result.metrics.nid_coverage_ratio;
+  conf.spatial_nid_score = std::clamp(
+      result.metrics.edge_spatial_coverage_ratio * nid_cov * edge_cov * nid_val,
+      0.0, 1.0);
+
+  const double obj = result.metrics.final_composite_objective;
+  conf.objective_score =
+      std::isfinite(obj) ? std::exp(-std::max(0.0, obj)) : 0.0;
+
+  conf.total_confidence = 0.35 * conf.scene_validation_score +
+                          0.25 * conf.ground_geometry_score +
+                          0.20 * conf.tesl_score +
+                          0.15 * conf.spatial_nid_score +
+                          0.05 * conf.objective_score;
+  return conf;
 }
 
 PoseError calculatePoseError(const Transform &estimated,

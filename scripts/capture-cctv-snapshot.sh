@@ -6,7 +6,7 @@ if [[ "${1:-}" == "--help" ]]; then
 Usage: capture-cctv-snapshot.sh [channel] [output-directory]
 
 Environment:
-  CCTV_BASE_URL          Camera base URL (required)
+  CCTV_BASE_URL          Camera base URL (default: http://172.20.32.43)
   CCTV_USER              Login ID (default: admin)
   CCTV_PASSWORD          Password; prompted when omitted
   CCTV_PROFILE           SUNAPI video profile (default: 1)
@@ -20,7 +20,10 @@ fi
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 workspace_dir="$(cd -- "${script_dir}/.." && pwd)"
-base_url="${CCTV_BASE_URL:-}"
+base_url="${CCTV_BASE_URL:-172.20.32.43}"
+if [[ "${base_url}" != http://* && "${base_url}" != https://* ]]; then
+    base_url="http://${base_url}"
+fi
 username="${CCTV_USER:-admin}"
 channel="${1:-${CCTV_CHANNEL:-1}}"
 profile="${CCTV_PROFILE:-1}"

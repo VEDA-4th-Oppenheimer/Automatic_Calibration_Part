@@ -1,9 +1,42 @@
-# Jenkins CI/CD Conformance Test 운영 계획
+# Jenkins 데이터셋 수집 및 Calibration Test 운영 계획
+
+문서 상태: 운영 기준 개정
+
+최종 수정: 2026-08-24
+
+변경 이력: `data_storage`의 실제 Freestyle 수집 Job(`cctv_capture`, `3d_scan`, `dataset_pack`) 구성을 반영하고, Jenkins의 자동화 목적을 **실환경 데이터셋 수집 및 수집 데이터를 활용한 캘리브레이션 테스트 진행**으로 정립
+
+실데이터 calibration의 K/D 입력과 승인 상태는 [`PRODUCT_CALIBRATION_POLICY.md`](PRODUCT_CALIBRATION_POLICY.md)를
+따른다. Jenkins의 `PASS`는 job/test gate 결과이며 `PRODUCT_APPROVED_RT` 승격과 동일하지
+않다. Manual ChArUco `K+D` profile이 없는 실데이터 job은 승인 대상이 아니라 진단 job으로
+분류한다.
 
 ## 1. 목적
 
-Stanford 2D-3D-S 기반 합성 pan-tilt LiDAR 데이터로 Calibration Core를
-지속적으로 검증한다.
+Jenkins 자동화의 1차 목적은 사람이 개입하지 않아도 실제 센서(CCTV 카메라 및 3D LiDAR) 데이터를 주기적/자동으로 수집하여 재현 가능한 calibration dataset을 만드는 것이다.
+2차 목적은 Jenkins가 수집·패키징한 카메라 이미지·LiDAR PCD·LiDAR JSON 데이터셋을 입력으로 삼아, Calibration Core 알고리즘 및 conformance test를 자동 실행하여 정확도와 성능을 검증하는 것이다.
+
+운영 흐름은 다음과 같다.
+
+```text
+[1단계: 데이터셋 수집 & 패키징 (data_storage)]
+cctv_capture (CH1~4) ──► 3d_scan (PCD/JSON) ──► dataset_pack (*.tar.gz 아티팩트 보관)
+                                                        │
+                                                        ▼
+                                       [2단계: 수집 데이터셋 기반 테스트]
+                                       calibration_dataset_test / conformance test
+```
+
+현재 Jenkins(`http://172.20.33.193:8080/job/data_storage/`)에는 다음 Freestyle Job이 구성되어 운영 중이다.
+
+| Job | 역할 | 주요 산출물 |
+|---|---|---|
+| `cctv_capture` | CCTV CH1~CH4 snapshot 수집 | `*.jpg` |
+| `3d_scan` | LiDAR HTTP 상태 확인, REARM/HOME, scan, 결과 회수 | `*.pcd`, `*_pan_tilt_lidar.json` |
+| `dataset_pack` | 이미지와 LiDAR 결과를 한 세션으로 압축 | `calib_dataset_build*.tar.gz`, `manifest.json` |
+
+권장 실행 순서는 `cctv_capture → 3d_scan → dataset_pack`이며, 이후 별도의
+Calibration Test Job이 생성된 아티팩트 패키지를 입력으로 전달받아 테스트를 수행한다.
 
 검증 범위:
 
@@ -13,8 +46,12 @@ Stanford 2D-3D-S 기반 합성 pan-tilt LiDAR 데이터로 Calibration Core를
 - Calibration ground-truth 복원 정확도
 - 노이즈, dropout, overlap 부족에 대한 강건성
 - 처리 시간과 메모리 회귀
+- staged 탐색 순서(coarse → top-3 basin → 5° → 1° → 단일 Ceres)와 no-fallback 회귀
+- `INTERNAL_GATE_PASS`/`CANDIDATE_RT`/`PRODUCT_APPROVED_RT` 상태 분리 및 false activation 0
 
 OpenSDK/CV5 빌드 및 실기기 호환성은 이 Jenkins job의 범위에서 제외한다.
+실제 센서 수집은 데이터 확보 단계이며, 수집 성공 자체를 calibration 정확도
+`PASS`로 해석하지 않는다. 수집 패키지는 별도 테스트 단계의 입력으로 검증한다.
 
 Yaw/down coarse 간격, 인접 후보 보정 및 1° fine search의 주기별 성능 시험은
 [Orientation Search Step Size Test Plan](ORIENTATION_SEARCH_STEP_SIZE_TEST_PLAN.md)을
@@ -22,9 +59,72 @@ Yaw/down coarse 간격, 인접 후보 보정 및 1° fine search의 주기별 �
 `FULL_SEARCH_BASELINE_PASS`인 경우에만 실행하며, 실패 시 step-size stage를
 `BLOCKED_BY_FULL_SEARCH_BASELINE`으로 종료한다.
 
-## 2. 권장 Jenkins 구성
+## 2. 현재 `data_storage` Job 구성
 
-### 2.1 Jenkins node
+Jenkins URL: `http://172.20.33.193:8080/`
+
+`data_storage`는 Job이 아니라 Folder이며, 세 개의 Freestyle Job을 포함한다.
+세 Job 모두 동시 실행을 허용하지 않도록 구성되어 있다.
+
+### 2.1 `cctv_capture`
+
+주요 파라미터:
+
+| 파라미터 | 기본값 |
+|---|---|
+| `CCTV_IP` | `172.20.32.43` |
+| `CCTV_USER` | `admin` |
+| `CCTV_PASSWORD` | Jenkins Password parameter |
+| `CCTV_PROFILE` | `1` |
+| `CCTV_CHANNELS` | `1 2 3 4` |
+| `OUTPUT_DIR` | `capture` |
+
+SUNAPI snapshot API로 채널별 JPEG를 저장한다. 카메라 비밀번호는 Job 설정이나
+shell에 평문으로 기록하지 않고 Jenkins Credential로 관리한다.
+
+### 2.2 `3d_scan`
+
+주요 파라미터:
+
+| 파라미터 | 기본값 |
+|---|---|
+| `SCANNER_IP` | `172.20.26.191:8080` |
+| `SCAN_TIMEOUT_SEC` | `600` |
+| `OUTPUT_DIR` | `lidar_scan` |
+
+`/api/state`로 STM32 링크와 현재 상태를 확인하고, `DISARM`이면 `REARM`,
+`HOME` 완료 후 `/api/cmd/scan`을 호출한다. 새 PCD를 감지하면 PCD와 대응 JSON을
+`OUTPUT_DIR`에 내려받는다.
+
+### 2.3 `dataset_pack`
+
+앞 단계의 `capture` 및 `lidar_scan` 산출물을 찾아 한 세션 디렉터리에 복사하고,
+`manifest.json`을 생성한 뒤 압축 파일을 만든다. 현재 artifact 보관 패턴은
+`*.tar.gz`이며, 실행 환경에 `zip`이 있으면 ZIP을 생성할 수 있으므로 artifact
+패턴을 `*.zip,*.tar.gz`로 관리하는 것을 권장한다.
+
+### 2.4 권장 연쇄 실행
+
+현재는 세 Job을 순서대로 실행할 수 있다. 장기적으로는 하나의 상위 Job 또는
+Parameterized Trigger로 다음 순서를 보장한다.
+
+```text
+cctv_capture (capture success)
+        ↓
+3d_scan (PCD + JSON success)
+        ↓
+dataset_pack (manifest + archive success)
+        ↓
+calibration_dataset_test (수집 패키지 기반 테스트)
+```
+
+수집 Job과 테스트 Job은 목적과 실패 원인을 분리한다. 카메라/actuator 통신
+실패는 `collection failure`, Calibration Core 결과 실패는 `test failure`로
+기록한다.
+
+## 3. 권장 Jenkins 구성
+
+### 3.1 Jenkins node
 
 전용 Linux/WSL 또는 Linux VM agent에 다음 label을 부여한다.
 
@@ -53,9 +153,9 @@ options {
 }
 ```
 
-## 3. Dataset과 test asset 배치
+## 4. Dataset과 test asset 배치
 
-### 3.1 권장 방식: workspace 외부 read-only cache
+### 4.1 권장 방식: workspace 외부 read-only cache
 
 Jenkins workspace는 SCM checkout, `cleanWs()`, node 재할당 또는 관리자의
 cleanup 정책에 의해 삭제될 수 있다. 31 GB 이상의 원본 데이터셋을 workspace에
@@ -105,7 +205,7 @@ volumes:
 - 여러 build가 같은 데이터를 재사용
 - 매 build마다 31 GB를 복사하지 않음
 
-### 3.2 workspace에 test file을 미리 둘 경우
+### 4.2 workspace에 test file을 미리 둘 경우
 
 반드시 Jenkins가 관리하는 별도 persistent workspace 또는 custom workspace를
 사용한다.
@@ -139,7 +239,7 @@ agent {
 
 가능하지만 workspace 외부 cache 방식이 더 안전하다.
 
-### 3.3 Artifact repository를 사용하는 방식
+### 4.3 Artifact repository를 사용하는 방식
 
 새 Jenkins node가 자주 생성되는 환경에서는 dataset 전체 또는 선정된 case bundle을
 다음 저장소에 보관한다.
@@ -167,7 +267,7 @@ stanford-conformance-v1/
 Daily job은 작은 curated bundle만 내려받고, weekly/monthly job은 node-local
 전체 dataset cache를 사용한다.
 
-## 4. Test case 저장 구조
+## 5. Test case 저장 구조
 
 SCM에서 test 정의와 기대값을 관리한다. 대용량 원본 RGB/depth/point cloud는
 SCM에 commit하지 않는다.
@@ -231,9 +331,9 @@ expected:
   deterministic: true
 ```
 
-## 5. Test schedule과 목록
+## 6. Test schedule과 목록
 
-### 5.1 Commit/PR test
+### 6.1 Commit/PR test
 
 트리거:
 
@@ -255,7 +355,7 @@ expected:
 
 권장 case 수: 1~3개.
 
-### 5.2 Daily test
+### 6.2 Daily test
 
 권장 시간: 매일 02:00 KST. Jenkins hash cron을 사용하면 부하를 분산할 수 있다.
 
@@ -272,7 +372,7 @@ controller timezone을 기준으로 환산하고 실제 첫 실행 시각을 확
 
 | ID | 시험 | Case/조건 |
 |---|---|---|
-| D-001 | 전체 unit test | 모든 CTest |
+| D-001 | 빠른 unit/regression | `ctest -E '^verify_'`; 장시간 real-data 제외 |
 | D-002 | Nominal office | C001 |
 | D-003 | Hallway degeneracy | C002 |
 | D-004 | Multi-plane room | C003 |
@@ -287,10 +387,11 @@ controller timezone을 기준으로 환산하고 실제 첫 실행 시각을 확
 | D-013 | Geometry NID path | geometry point/NID projection/finite score |
 | D-014 | 180° heading recovery | 360° yaw multi-start synthetic positive |
 | D-015 | NID fail-safe reason | overlap/improvement/ambiguity 기대 FAIL 코드 |
+| D-016 | Capture manifest preflight | camera/scan UTC 시각·해시·profile·installation epoch |
 
 권장 dataset: 10~20개 curated frame.
 
-### 5.3 Weekly test
+### 6.3 Weekly test
 
 권장 시간: 일요일 03:00 KST.
 
@@ -316,11 +417,120 @@ triggers {
 | W-010 | Memory and runtime | peak RSS, p50/p95 |
 | W-011 | Dataset checksum | selected file 및 manifest checksum |
 | W-012 | Docker rebuild | no-cache 또는 base image validation |
-
-### 5.4 Monthly test
 | W-013 | Yaw multi-start sweep | 0~345° 초기 heading, 15° 간격 |
 | W-014 | NID observability | texture/geometry entropy 및 후보 margin 분포 |
 | W-015 | Independent hold-out | 최적화 미사용 frame 재투영 검증 |
+| W-016 | Staged search policy | top-3 distinct basin, 5°/1° local, 최대 3 Ceres, dual-margin, no fallback |
+| W-017 | Reference RT perturbation | ±1/3/5/10° signal NMI diagnostic |
+| W-018 | Jenkins scene0 CH1 batch | 원본·동시 3-training + 2-hold-out full staged search |
+| W-019 | 새 pair 단독 fail-safe | ambiguity/overlap/Manhattan reason 및 false activation 0 |
+| W-020 | Finalist별 binary hold-out 진단 | **구현 완료:** 모든 separated finalist fixed RT 평가; broad gate 동률 탐지 |
+| W-021 | Finalist 결정론 | 후보 입력 순열에 무관한 동일 selected index 및 reason code |
+| W-022 | Finalist 연속 hold-out margin | **구현 완료:** pass-ratio tier → 학습 동일 objective → 공통 coverage → 기존 2% margin |
+| W-023 | Real-data 상태 계약 | **구현·검증 완료:** 공통 래퍼로 20260818 exit 3 + `FAIL / FINALIST_AMBIGUOUS`, 20260819 exit 0 + `CANDIDATE_RT / PASS`와 제품 비승격을 검사 |
+| W-024 | Manhattan feature-prior 일관성 | **구현·검증 완료:** finalist별 training seed prior를 hold-out에도 고정하고 직교 소실점 회귀 및 실데이터 JSON policy로 검사 |
+| W-025 | CH1 dual-ChArUco ROI preflight | **ROI 도구·수동 검증 완료, Jenkins 등록 대기:** build5~24의 24 target을 분리해 22 PASS + 2 expected rejection 및 camera-side pose 기록 |
+| W-026 | Marker RT reference 완결성 | `T_camera_marker_board`와 독립 `T_lidar_marker_board`가 같은 board frame인지 검사; 후자가 없으면 `RT_REFERENCE_INCOMPLETE` 기대 거절 |
+| W-027 | CH1 전체 데이터 계층형 활용 | **구현·실행 완료:** Case A baseline, Case B stress, Case C primary와 primary RT의 fixed cross-condition validation을 분리; 12-pair 일괄 학습 금지 |
+
+2026-08-22~23 실측에서 CTest 9종은 `111.59 s`, CH1 단독 staged search는 pair당
+약 8~10분, 기존 3-training + 2-hold-out batch는 약 22분 37초~30분 24초였고
+최대 3 Ceres finalist와 1° 확장 탐색을 포함한 최신 batch는 약 40분이 관측됐다. 따라서
+CTest와 manifest preflight는 daily, 실데이터 full search는
+weekly/수동 목록으로 유지한다. 수정된 build20/21 영상은 파일명·EXIF가 scan 시작명과
+일치하지만, build17 편집 영상·동적 객체·manifest 자동 provenance gate 부재 때문에
+현재 build17~21은 W-018 제품 입력이 아닌 diagnostic/stress fixture다. 상세 목록과 결과는
+[JENKINS_SCENE0_CH1_EXPANDED_TEST_20260822.md](JENKINS_SCENE0_CH1_EXPANDED_TEST_20260822.md)를
+따른다.
+
+2026-08-24 W-020 binary 실행에서 선택 167°, 경쟁 87°/−106° finalist가 모두
+build20/21 hold-out `2/2 PASS`했다. W-022는 새 가중치를 만들지 않고 학습과 같은
+목적함수와 모든 후보의 공통 coverage 분모를 적용했다. 목적함수는 각각
+`0.763763 / 0.816782 / 0.871447`, 선택 후보의 최소 margin은 `6.491%`로 기존 2%
+기준을 통과했다. 최신 기대 결과는 `CANDIDATE_RT / PASS`지만 제품 승인은 아니므로
+`activation_allowed=false`다. 2% 기준의 물리 정확성은 독립 fixture에서 추가 검증한다.
+
+W-024 적용 직후 build17~21, 20260818, 20260819를 각각 1회 실행했고, 이후 1회 제한을
+해제한 뒤 20260818/19를 정식 weekly CTest로 다시 실행했다. 수정 전후 선택 `R,t`, 상태,
+목적함수와 full/5°/1° score map은 동일했다. 기대 상태는 각각
+`CANDIDATE_RT/PASS`, `FAIL/FINALIST_AMBIGUOUS`, `CANDIDATE_RT/PASS`로 유지한다.
+공통 `verify_real_calibration_result.cmake`는 성공과 예상 거절 양쪽에서 exit code,
+`status`, `reason_code`, candidate/product 상태, `activation_allowed=false`와 Manhattan
+prior policy를 검사한다.
+2026-08-24 최신 weekly 결과는 `2/2 PASS`, 병렬 real time `1240.91 s`다
+(`20260819=1027.19 s`, `20260818=1240.90 s`). 이 검사는 현재 수치를 golden truth로
+승인하는 시험이 아니라, hold-out에서 candidate RT로 수직 소실점 특징을 다시 고르는
+평가 누수를 막는 계약 시험이다.
+
+#### build22~24 training/hold-out 및 ChArUco reference
+
+2026-08-24 추가된 build22~24는 기존 build17~21 진단 batch와 섞지 않고 다음 새 case로
+고정한다.
+
+```text
+training = build22, build23
+hold-out = build24
+camera channel = CH1
+primary marker = monitor ROI 2090,700,500,650
+secondary marker = chair ROI 1200,1200,800,320
+```
+
+시간상 앞선 두 package를 training으로 사용하고 마지막 build24를 최적화에 넣지 않는다.
+세 scan은 모두 40,183개 이상의 valid point와 checksum error 0을 가지며, 세 image/scan
+hash는 서로 다르다. 동일 설치·동일 시야이므로 이는 temporal hold-out이지 독립 설치
+hold-out은 아니다.
+
+W-025는 세 build의 두 ROI에서 모두 PASS했다. 모니터 보드의 최대 camera pose 차이는
+`1.094355° / 10.795 mm`, 파란 의자 보드는 `0.922760° / 4.229 mm`다. 이 값은
+camera-side marker 반복성 관측값이며 사후 제품 threshold로 확정하지 않는다.
+
+W-026의 full RT truth는 다음 식으로만 만든다.
+
+```text
+T_camera_lidar_reference
+  = T_camera_marker_board * inverse(T_lidar_marker_board)
+```
+
+현재 입력에는 독립 `T_lidar_marker_board`가 없으므로 W-026 기대 상태는
+`RT_REFERENCE_INCOMPLETE`다. Marker image만으로 만든 pose를 전체 RT truth로 취급하거나
+targetless 학습 후보 선택에 넣지 않는다. 상세 입력, 검출 결과와 실행 명령은
+[`JENKINS_SCENE0_CH1_BUILD22_24_CHARUCO_REFERENCE_PLAN_20260824.md`](JENKINS_SCENE0_CH1_BUILD22_24_CHARUCO_REFERENCE_PLAN_20260824.md)를
+따른다.
+
+W-025를 build5~24 전체로 확장한 수동 audit 결과는 24 target 중 22 PASS다. 예상 거절은
+편집된 build17 monitor의 0 corner와 강한 원근의 build18 chair 5 corner다. 두 case의
+검출 기준을 낮추지 않는다.
+
+W-027은 전체 12 package를 하나의 optimizer에 넣지 않는다. build5/8/9→10은 baseline,
+build17/18/19→20/21은 stress, build22/23→24는 primary로 분리하고, primary RT를 앞의
+두 범위에 재추정 없이 고정 적용한다. 정확한 pair index, 명령, exit-code 의미와 Luna 실행
+계약은
+[`CH1_ALL_BUILD_DATA_UTILIZATION_AND_LUNA_EXECUTION_PLAN_20260824.md`](CH1_ALL_BUILD_DATA_UTILIZATION_AND_LUNA_EXECUTION_PLAN_20260824.md)를
+따른다.
+
+2026-08-24 실제 실행 결과는 다음과 같다.
+
+- Case C build22·23→24: exit 0, `CANDIDATE_RT/PASS`, train 2/2, hold-out 1/1, margin 2.9436%
+- Case A build5/8/9→10: exit 3, `FAIL/FINALIST_AMBIGUOUS`, train 3/3, hold-out 1/1, margin 1.8209%
+- Case B build17/18/19→20/21: exit 0, `CANDIDATE_RT/PASS`, train 3/3, hold-out 2/2, margin 6.4912%
+- Case C RT fixed→Case A: 4/4 `INTERNAL_GATE_PASS`
+- Case C RT fixed→Case B: 5/5 `INTERNAL_GATE_PASS`
+
+상세 JSON/PNG/CSV 경로는
+[`CH1_ALL_BUILD_EXECUTION_REPORT_20260824.md`](CH1_ALL_BUILD_EXECUTION_REPORT_20260824.md)를
+기준으로 한다.
+
+권장 CTest 분리는 다음과 같다.
+
+```bash
+# PR/daily: 빠른 deterministic 회귀
+ctest --test-dir /workspace-build -E '^verify_' --output-on-failure
+
+# weekly: 실데이터 expected-rejection + candidate regression
+ctest --test-dir /workspace-build -L weekly -j2 --output-on-failure
+```
+
+### 6.4 Monthly test
 
 권장 시간: 매월 첫째 일요일.
 
@@ -340,7 +550,7 @@ triggers {
 Golden 결과는 monthly job이 자동 교체하지 않는다. 사람이 차이를 검토하고 별도
 승인된 commit으로 갱신한다.
 
-### 5.5 Release candidate test
+### 6.5 Release candidate test
 
 Release tag 또는 수동 승인 후 실행한다.
 
@@ -355,7 +565,7 @@ Release tag 또는 수동 승인 후 실행한다.
 | R-008 | False-PASS regression | session-003/130333 historical 후보가 PASS되지 않음 |
 | R-007 | Reproducibility rerun | 동일 결과 |
 
-## 6. Jenkins job 구성
+## 7. Jenkins job 구성
 
 권장 job:
 
@@ -391,7 +601,7 @@ parameters {
 }
 ```
 
-## 7. Jenkinsfile 예시
+## 8. Jenkinsfile 예시
 
 ```groovy
 pipeline {
@@ -476,6 +686,7 @@ pipeline {
                         mkdir -p "build-output/${BUILD_NUMBER}"
                         docker compose exec -T dev \
                           ctest --test-dir /workspace-build \
+                          -E '^verify_' \
                           --output-on-failure \
                           --output-junit \
                           /workspace/build-output/${BUILD_NUMBER}/ctest.xml
@@ -533,7 +744,7 @@ pipeline {
 }
 ```
 
-## 8. Test runner가 생성해야 할 결과
+## 9. Test runner가 생성해야 할 결과
 
 각 case:
 
@@ -558,7 +769,11 @@ build-output/<build-number>/
 ```json
 {
   "case_id": "C001_office_nominal",
-  "status": "PASS",
+  "status": "INTERNAL_GATE_PASS",
+  "internal_gate_status": "INTERNAL_GATE_PASS",
+  "candidate_rt_status": "NOT_CANDIDATE_RT",
+  "product_approved_rt_status": "NOT_PRODUCT_APPROVED_RT",
+  "activation_allowed": false,
   "reason_codes": [],
   "translation_error_m": null,
   "rotation_error_deg": null,
@@ -570,6 +785,9 @@ build-output/<build-number>/
   "composite_objective_improvement_ratio": 0.002945,
   "multistart_candidates": 8,
   "multistart_objective_margin": 0.02,
+  "search_strategy": "staged",
+  "ceres_execution_policy": "up_to_3_distinct_yaw_finalists",
+  "search_stages": [],
   "runtime_ms": 120,
   "peak_rss_mb": 180,
   "input_hash": "",
@@ -583,7 +801,7 @@ Synthetic ground truth가 없는 실제 데이터는 accuracy 필드를 `null`�
 복합 목적함수, projected ratio, multi-start margin과 reason code를 반드시 기록한다.
 `PASS`는 독립 reference 또는 hold-out 검증 전까지 배포 승인과 동일하게 취급하지 않는다.
 
-## 9. 보존과 cleanup 정책
+## 10. 보존과 cleanup 정책
 
 | 산출물 | 보존 |
 |---|---|
@@ -616,7 +834,7 @@ conformance/expected/**
 release baseline/**
 ```
 
-## 10. Dataset 초기 배치 절차
+## 11. Dataset 초기 배치 절차
 
 1. Jenkins agent를 중지하거나 관련 job 실행을 잠시 막는다.
 2. dataset을 임시 경로에 복사한다.
@@ -655,7 +873,7 @@ mv \
   area_1-current -> area_1-v2
 ```
 
-## 11. 운영 체크리스트
+## 12. 운영 체크리스트
 
 - [ ] Jenkins agent label과 Docker 권한 확인
 - [ ] dataset cache가 workspace 외부인지 확인
@@ -669,3 +887,8 @@ mv \
 - [ ] Golden baseline 자동 갱신 금지
 - [ ] Docker image digest 기록
 - [ ] dataset cleanup 제외 규칙 확인
+- [x] build22~24 CH1 보드별 ROI 및 camera-side ChArUco pose 검증
+- [x] build5~24 CH1 전체 24-target ROI audit: 22 PASS + 2 expected rejection
+- [ ] 선택한 동일 보드의 독립 `T_lidar_marker_board` 확보
+- [ ] build22·23 training RT를 build24 fixed hold-out 및 marker RT reference와 비교
+- [x] Case A/B/C 분리 실행 및 Case C RT의 Case A/B fixed validation

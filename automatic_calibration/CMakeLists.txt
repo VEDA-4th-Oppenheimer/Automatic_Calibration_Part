@@ -43,3 +43,52 @@ add_executable(calibration_core_tests tests/calibration_core_tests.cpp)
 target_link_libraries(calibration_core_tests PRIVATE automatic_calibration_core)
 target_compile_options(calibration_core_tests PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME automatic_calibration_core_tests COMMAND calibration_core_tests)
+
+add_executable(challenger_m1_2_stress_tests tests/challenger_m1_2_stress_tests.cpp)
+target_link_libraries(challenger_m1_2_stress_tests PRIVATE automatic_calibration_core)
+target_compile_options(challenger_m1_2_stress_tests PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME challenger_m1_2_stress_tests COMMAND challenger_m1_2_stress_tests)
+
+add_executable(challenger_m2_1_ambiguity_tests tests/challenger_m2_1_ambiguity_tests.cpp)
+target_link_libraries(challenger_m2_1_ambiguity_tests PRIVATE automatic_calibration_core)
+target_compile_options(challenger_m2_1_ambiguity_tests PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME challenger_m2_1_ambiguity_tests COMMAND challenger_m2_1_ambiguity_tests)
+
+add_executable(challenger_m2_2_stress_tests tests/challenger_m2_2_stress_tests.cpp)
+target_link_libraries(challenger_m2_2_stress_tests PRIVATE automatic_calibration_core)
+target_compile_options(challenger_m2_2_stress_tests PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME challenger_m2_2_stress_tests COMMAND challenger_m2_2_stress_tests)
+
+add_executable(challenger_m3_stress_tests tests/challenger_m3_stress_tests.cpp)
+target_link_libraries(challenger_m3_stress_tests PRIVATE automatic_calibration_core)
+target_compile_options(challenger_m3_stress_tests PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME challenger_m3_stress_tests COMMAND challenger_m3_stress_tests)
+
+add_test(NAME verify_20260818_staged COMMAND ${CMAKE_COMMAND}
+  -DRUNNER=$<TARGET_FILE:run_real_calibration>
+  -DINPUT_DIR=/workspace/data/real_calibration/session-const-env/repeat_test_sample/20260818
+  -DOUTPUT_DIR=/workspace/automatic_calibration/generated/verify_20260818
+  -DINTRINSIC=/workspace/manual_calibration/output/session-const-env/intrinsic/camera_intrinsic.json
+  -DEXPECTED_EXIT=3
+  -DEXPECTED_STATUS=FAIL
+  -DEXPECTED_REASON=FINALIST_AMBIGUOUS
+  -DEXPECTED_CANDIDATE_STATUS=NOT_CANDIDATE_RT
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_real_calibration_result.cmake
+)
+set_tests_properties(verify_20260818_staged PROPERTIES
+  LABELS "weekly;real_data;expected_rejection"
+)
+add_test(NAME verify_20260819_staged COMMAND ${CMAKE_COMMAND}
+  -DRUNNER=$<TARGET_FILE:run_real_calibration>
+  -DINPUT_DIR=/workspace/automatic_calibration/generated/repeat_test_sample_20260819_install_shift_ch1_v3/input
+  -DOUTPUT_DIR=/workspace/automatic_calibration/generated/verify_20260819
+  -DINTRINSIC=/workspace/manual_calibration/output/session-const-env/intrinsic/camera_intrinsic.json
+  -DEXPECTED_EXIT=0
+  -DEXPECTED_STATUS=CANDIDATE_RT
+  -DEXPECTED_REASON=PASS
+  -DEXPECTED_CANDIDATE_STATUS=CANDIDATE_RT
+  -P ${CMAKE_CURRENT_SOURCE_DIR}/tests/verify_real_calibration_result.cmake
+)
+set_tests_properties(verify_20260819_staged PROPERTIES
+  LABELS "weekly;real_data;candidate_regression"
+)
