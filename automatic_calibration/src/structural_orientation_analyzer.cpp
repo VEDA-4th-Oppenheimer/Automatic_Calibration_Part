@@ -132,7 +132,19 @@ bool writeStructuralAnalyzerArtifacts(const StructuralAnalyzerResult &r, const s
   for (const auto &p : r.proposals) csv << p.rank << ',' << p.yaw_deg << ',' << p.down_deg << ',' << p.roll_deg << ',' << p.raw_score << ',' << p.normalized_score << ',' << p.confidence << ',' << p.search_radius_deg << ",MANHATTAN|AZIMUTH_SIGNATURE\n";
   std::ofstream json(directory + "/analyzer_result.json");
   if (!json) return false;
-  json << "{\n  \"schema_version\": \"1.0\",\n  \"mode\": \"structural\",\n  \"status\": \"" << r.status << "\",\n  \"input_rows\": " << r.input_rows << ",\n  \"input_columns\": " << r.input_columns << ",\n  \"proposal_count\": " << r.proposals.size() << ",\n  \"fallback_required\": " << (r.fallback_required ? "true" : "false") << ",\n  \"fallback_reason\": \"" << r.fallback_reason << "\",\n  \"runtime_ms\": " << r.runtime_ms << ",\n  \"activation_allowed\": false\n}\n";
+  json << "{\n  \"schema_version\": \"1.0\",\n  \"mode\": \"structural\",\n  \"status\": \"" << r.status << "\",\n  \"input_rows\": " << r.input_rows << ",\n  \"input_columns\": " << r.input_columns << ",\n  \"proposal_count\": " << r.proposals.size() << ",\n  \"proposals\": [";
+  for (std::size_t i = 0; i < r.proposals.size(); ++i) {
+    const auto &p = r.proposals[i];
+    if (i) json << ',';
+    json << "{\"rank\": " << p.rank << ", \"yaw_deg\": " << p.yaw_deg
+         << ", \"down_deg\": " << p.down_deg << ", \"roll_deg\": " << p.roll_deg
+         << ", \"score\": " << p.raw_score << ", \"confidence\": " << p.confidence
+         << ", \"search_radius_deg\": " << p.search_radius_deg
+         << ", \"evidence\": [\"MANHATTAN\", \"AZIMUTH_SIGNATURE\"]}";
+  }
+  json << "],\n  \"fallback_required\": " << (r.fallback_required ? "true" : "false")
+       << ",\n  \"fallback_reason\": \"" << r.fallback_reason
+       << "\",\n  \"runtime_ms\": " << r.runtime_ms << ",\n  \"activation_allowed\": false\n}\n";
   return true;
 }
 } // namespace auto_calib

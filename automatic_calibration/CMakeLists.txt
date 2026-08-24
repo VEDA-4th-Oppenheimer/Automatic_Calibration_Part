@@ -33,6 +33,9 @@ target_compile_options(render_calibration_visualization PRIVATE -Wall -Wextra -W
 add_executable(run_real_calibration apps/run_real_calibration.cpp)
 target_link_libraries(run_real_calibration PRIVATE automatic_calibration_core opencv_calib3d)
 target_compile_options(run_real_calibration PRIVATE -Wall -Wextra -Wpedantic)
+add_executable(run_structural_orientation_analyzer apps/run_structural_orientation_analyzer.cpp)
+target_link_libraries(run_structural_orientation_analyzer PRIVATE automatic_calibration_core)
+target_compile_options(run_structural_orientation_analyzer PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(run_synthetic_calibration PRIVATE -Wall -Wextra -Wpedantic)
 
 add_executable(synthetic_lidar_tests tests/synthetic_lidar_tests.cpp)
