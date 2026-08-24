@@ -1,4 +1,5 @@
 #include "auto_calib/panorama_orientation_analyzer.hpp"
+#include <chrono>
 #include <fstream>
 #include <filesystem>
 #include <iostream>
@@ -16,6 +17,7 @@ int main(int argc, char **argv) {
   cv::Mat image = cv::imread(image_path.string(), cv::IMREAD_GRAYSCALE), edges;
   if (image.empty()) { std::cerr << "cannot read image\n"; return 2; }
   cv::Canny(image, edges, 60, 180);
+  const auto start = std::chrono::steady_clock::now();
   auto result = auto_calib::analyzePanorama(scan);
   if (!result.lidar_signature.empty()) {
     cv::Mat reduced; cv::resize(edges, reduced, cv::Size(static_cast<int>(result.lidar_signature.size()), 1), 0, 0, cv::INTER_AREA);
@@ -23,14 +25,18 @@ int main(int argc, char **argv) {
     for (std::size_t i = 0; i < opt.camera_signature.size(); ++i) opt.camera_signature[i] = reduced.at<unsigned char>(0, static_cast<int>(i));
     result = auto_calib::analyzePanorama(scan, opt);
   }
+  const double runtime_ms = std::chrono::duration<double, std::milli>(
+      std::chrono::steady_clock::now() - start).count();
   cv::imwrite((output / "panorama_range.png").string(), result.range_mm);
   cv::imwrite((output / "panorama_valid.png").string(), result.valid);
   cv::imwrite((output / "panorama_range_edge.png").string(), result.range_edge);
   cv::imwrite((output / "panorama_normal_edge.png").string(), result.normal_edge);
   cv::imwrite((output / "panorama_plane_intersection.png").string(), result.plane_intersection);
   std::ofstream csv(output / "orientation_proposals.csv"); csv << "rank,yaw_deg,down_deg,roll_deg,raw_score,normalized_score,confidence,search_radius_deg,evidence\n";
-  for (const auto &p : result.proposals) csv << p.rank << ',' << p.yaw_deg << ',' << p.down_deg << ',' << p.roll_deg << ',' << p.raw_score << ',' << p.normalized_score << ',' << p.confidence << ',' << p.search_radius_deg << ',' << p.evidence << '\n';
-  std::ofstream json(output / "analyzer_result.json"); json << nlohmann::json{{"schema_version", "1.0"}, {"mode", "panorama"}, {"status", result.status}, {"input_rows", result.rows}, {"input_columns", result.columns}, {"proposal_count", result.proposals.size()}, {"fallback_required", result.fallback_required}, {"fallback_reason", result.fallback_reason}, {"coverage", result.coverage}}.dump(2) << '\n';
+  for (const auto &p : result.proposals) csv << p.rank << ',' << p.yaw_deg << ',' << p.down_deg << ',' << p.roll_deg << ',' << p.raw_score << ',' << p.normalized_score << ',' << p.confidence << ',' << p.search_radius_deg << ",\"" << p.evidence << "\"\n";
+  nlohmann::json proposals = nlohmann::json::array();
+  for (const auto &p : result.proposals) proposals.push_back({{"rank", p.rank}, {"yaw_deg", p.yaw_deg}, {"down_deg", p.down_deg}, {"roll_deg", p.roll_deg}, {"raw_score", p.raw_score}, {"normalized_score", p.normalized_score}, {"confidence", p.confidence}, {"search_radius_deg", p.search_radius_deg}, {"evidence", p.evidence}});
+  std::ofstream json(output / "analyzer_result.json"); json << nlohmann::json{{"schema_version", "1.0"}, {"mode", "panorama"}, {"status", result.status}, {"input_rows", result.rows}, {"input_columns", result.columns}, {"proposal_count", result.proposals.size()}, {"proposals", proposals}, {"fallback_required", result.fallback_required}, {"fallback_reason", result.fallback_reason}, {"coverage", result.coverage}, {"runtime_ms", runtime_ms}, {"activation_allowed", false}}.dump(2) << '\n';
   std::cout << "status=" << result.status << " proposals=" << result.proposals.size() << " coverage=" << result.coverage << "\n";
   return result.fallback_required ? 3 : 0;
 }
