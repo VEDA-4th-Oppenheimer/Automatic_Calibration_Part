@@ -1,4 +1,5 @@
 #include "auto_calib/calibration_core.hpp"
+#include "auto_calib/structural_orientation_analyzer.hpp"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -2071,6 +2072,12 @@ int main(int argc, char **argv) {
       throw std::invalid_argument(
           "--search-strategy must be staged or legacy");
     const bool staged_search = search_strategy == "staged";
+    const std::string orientation_analyzer_mode =
+        textValue(args, "--orientation-analyzer", "off");
+    if (orientation_analyzer_mode != "off" &&
+        orientation_analyzer_mode != "structural")
+      throw std::invalid_argument(
+          "--orientation-analyzer must be off or structural");
     const int camera_channel =
         static_cast<int>(value(args, "--camera-channel", 0.0));
     auto input_pairs = inputFilePairs(input_dir, camera_channel);
@@ -2647,6 +2654,333 @@ int main(int argc, char **argv) {
       std::cout << std::setw(2) << validation_report << '\n';
       return validation_pass ? 0 : 3;
     }
+    struct StagedFinalistRecord {
+      std::size_t result_index = 0;
+      double training_pass_ratio = 0.0;
+    };
+    std::vector<StagedFinalistRecord> staged_finalists;
+    nlohmann::json search_stages = nlohmann::json::array();
+    constexpr double kAnalyzerMinimumDistinctYawDeg = 30.0;
+    // ---- Orientation-analyzer guided bounded search (opt-in) ---------------
+    // When the lightweight analyzer returns confident Top-3 proposals, the
+    // brute-force 168-candidate coarse sweep is bypassed: a bounded search
+    // (yaw +/-10 deg at 5 deg, then +/-5 deg at 1 deg, then Ceres) runs
+    // around the proposals. If the analyzer fails or every bounded candidate
+    // fails the absolute overlap gate, the full B0 staged search below runs
+    // automatically as the fail-safe fallback.
+    bool analyzer_bounded_active = false;
+    bool analyzer_fallback_triggered = false;
+    nlohmann::json analyzer_report = nlohmann::json::object();
+    std::size_t bounded_orientation_evaluations = 0;
+    if (orientation_analyzer_mode != "off" &&
+        !calibration_observations.empty()) {
+      const fs::path analyzer_dir = output_dir / "orientation_analyzer";
+      try {
+        auto_calib::StructuralAnalyzerInput analyzer_input;
+        analyzer_input.image = calibration_observations.front().bgr;
+        analyzer_input.organized_lidar =
+            calibration_observations.front().scan.points;
+        analyzer_input.rows =
+            calibration_observations.front().scan.config.rows;
+        analyzer_input.columns =
+            calibration_observations.front().scan.config.columns;
+        analyzer_input.camera = calibration_observations.front().camera;
+        const auto analyzer_result =
+            auto_calib::analyzeStructuralOrientation(analyzer_input);
+        auto_calib::writeStructuralAnalyzerArtifacts(analyzer_result,
+                                                     analyzer_dir.string());
+        nlohmann::json analyzer_proposals_json = nlohmann::json::array();
+        for (const auto &p : analyzer_result.proposals)
+          analyzer_proposals_json.push_back(
+              {{"rank", p.rank},
+               {"yaw_deg", p.yaw_deg},
+               {"down_deg", p.down_deg},
+               {"roll_deg", p.roll_deg},
+               {"raw_score", p.raw_score},
+               {"confidence", p.confidence}});
+        analyzer_report = {{"mode", "structural"},
+                           {"status", analyzer_result.status},
+                           {"fallback_required", analyzer_result.fallback_required},
+                           {"fallback_reason", analyzer_result.fallback_reason},
+                           {"camera_direction_count",
+                            analyzer_result.camera_direction_count},
+                           {"normal_count", analyzer_result.normal_count},
+                           {"runtime_ms", analyzer_result.runtime_ms},
+                           {"proposals", analyzer_proposals_json}};
+
+        if (analyzer_result.fallback_required ||
+            analyzer_result.proposals.empty()) {
+          analyzer_fallback_triggered = true;
+          std::cout << "orientation-analyzer: fallback_required ("
+                    << analyzer_result.fallback_reason
+                    << "); running full B0 staged search\n";
+        } else {
+          struct BoundedSeed {
+            auto_calib::Transform prior;
+            double down_deg = 0.0;
+            double roll_deg = 0.0;
+            double yaw_deg = 0.0;
+            double focal_scale = focal_scale;
+          };
+          std::vector<BoundedSeed> seeds;
+          for (const auto &p : analyzer_result.proposals) {
+            const double sign = explicit_camera_center ? 1.0 : 1.0;
+            auto prior = make_prior(sign, p.roll_deg,
+                                    std::clamp(p.down_deg, 0.0, 90.0));
+            seeds.push_back({prior, std::clamp(p.down_deg, 0.0, 90.0),
+                             std::clamp(p.roll_deg, -30.0, 30.0), p.yaw_deg,
+                             focal_scale});
+          }
+          struct BoundedCandidate {
+            auto_calib::CalibrationResult result;
+            auto_calib::Transform prior;
+            double down_deg = 0.0;
+            double roll_deg = 0.0;
+            double focal_scale = 1.0;
+            double yaw_deg = 0.0;
+            double objective = std::numeric_limits<double>::infinity();
+            bool stage_gate_pass = false;
+          };
+          auto run_bounded_stage =
+              [&](const std::vector<BoundedSeed> &stage_seeds, double step_deg,
+                  double radius_deg, const std::string &stage_name)
+              -> std::vector<BoundedCandidate> {
+            std::vector<BoundedCandidate> winners;
+            const fs::path csv_path =
+                output_dir / (stage_name + "_scores.csv");
+            std::ofstream csv(csv_path);
+            if (!csv)
+              throw std::runtime_error(
+                  "Cannot write bounded search score map");
+            csv << "seed,down_deg,roll_deg,yaw_center_deg,yaw_deg,objective,"
+                   "reason_code,stage_gate_pass\n"
+                << std::setprecision(12);
+            for (std::size_t seed_index = 0;
+                 seed_index < stage_seeds.size(); ++seed_index) {
+              const auto &seed = stage_seeds[seed_index];
+              BoundedCandidate winner;
+              bool has_winner = false;
+              auto stage_config = config;
+              stage_config.enable_ceres_refinement = false;
+              stage_config.use_coarse_yaw_bounds = true;
+              stage_config.coarse_yaw_span_rad = 0.0;
+              stage_config.coarse_yaw_step_rad = radians(step_deg);
+              stage_config.coarse_yaw_min_rad =
+                  radians(seed.yaw_deg - radius_deg);
+              stage_config.coarse_yaw_max_rad =
+                  radians(seed.yaw_deg + radius_deg);
+              // Window-local normalization: global reference maxima are
+              // unknown before a full sweep, so keep every gate local to the
+              // bounded window (0 falls back to the window maximum inside the
+              // calibration core).
+              stage_config.global_reference_visible_edge_points = 0;
+              stage_config.global_reference_nid_projected_points = 0;
+              stage_config.global_reference_edge_active_cells = 0;
+              stage_config.global_reference_structural_length = 0;
+              const auto prior = seed.prior;
+              auto result = auto_calib::calibrateExtrinsicMultiScene(
+                  calibration_observations, prior, stage_config);
+              applySelectionGates(&result,
+                                  minimum_structural_direction_groups,
+                                  maximum_camera_downward_deg);
+              const double objective =
+                  result.metrics.lidar_geometry_points > 0 &&
+                          std::isfinite(
+                              result.metrics.final_composite_objective)
+                      ? result.metrics.final_composite_objective
+                      : std::numeric_limits<double>::infinity();
+              const bool ground_ok =
+                  !config.enable_ground_plane_constraint ||
+                  result.metrics.ground_normal_valid;
+              const bool tesl_ok =
+                  (config.total_explained_structural_length_min <= 0.0 ||
+                   result.metrics.total_explained_structural_length >=
+                       config.total_explained_structural_length_min);
+              const bool stage_gate_pass =
+                  selectionEligible(result,
+                                    minimum_structural_direction_groups,
+                                    maximum_camera_downward_deg) &&
+                  manhattanStageEligible(result, config,
+                                         calibration_observations.size()) &&
+                  ground_ok && tesl_ok;
+              const double selected_yaw =
+                  result.metrics.selected_multistart_yaw_deg;
+              csv << seed_index << ',' << seed.down_deg << ','
+                  << seed.roll_deg << ',' << seed.yaw_deg << ','
+                  << selected_yaw << ',' << objective << ','
+                  << result.reason_code << ','
+                  << (stage_gate_pass ? 1 : 0) << '\n';
+              ++bounded_orientation_evaluations;
+              if (std::isfinite(objective) &&
+                  (!has_winner ||
+                   (stage_gate_pass && !winner.stage_gate_pass) ||
+                   (stage_gate_pass == winner.stage_gate_pass &&
+                    objective < winner.objective))) {
+                winner = {std::move(result), prior, seed.down_deg,
+                          seed.roll_deg, seed.focal_scale, selected_yaw,
+                          objective, stage_gate_pass};
+                has_winner = true;
+              }
+              if (has_winner)
+                winners.push_back(std::move(winner));
+            }
+            search_stages.push_back({{"stage", stage_name},
+                                     {"step_deg", step_deg},
+                                     {"radius_deg", radius_deg},
+                                     {"seed_count", stage_seeds.size()},
+                                     {"winner_count", winners.size()},
+                                     {"score_map", csv_path.string()}});
+            return winners;
+          };
+
+          search_stages.push_back(
+              {{"stage", "analyzer_top3_seeds"},
+               {"mode", orientation_analyzer_mode},
+               {"candidate_count", seeds.size()},
+               {"selection", "orientation_analyzer_proposals"}});
+          const auto five_degree =
+              run_bounded_stage(seeds, 5.0, 10.0, "bounded_search_5deg");
+          // Absolute overlap gate: every candidate must clear the absolute
+          // edge/NID overlap requirements (COARSE_OVERLAP_INSUFFICIENT
+          // means the window never saw acceptable overlap).
+          bool gate_pass = false;
+          for (const auto &candidate : five_degree)
+            if (std::isfinite(candidate.objective) &&
+                candidate.result.reason_code !=
+                    "COARSE_OVERLAP_INSUFFICIENT") {
+              gate_pass = true;
+              break;
+            }
+          if (!gate_pass) {
+            analyzer_fallback_triggered = true;
+            search_stages.push_back(
+                {{"stage", "analyzer_bounded_gate_fail"},
+                 {"action", "fallback_to_full_b0_staged_search"}});
+            std::cout << "orientation-analyzer: bounded search failed the "
+                         "absolute overlap gate; running full B0 staged "
+                         "search\n";
+          } else {
+            const auto one_degree = run_bounded_stage(
+                [&] {
+                  std::vector<BoundedSeed> stage2_seeds;
+                  for (const auto &candidate : five_degree)
+                    stage2_seeds.push_back({candidate.prior,
+                                            candidate.down_deg,
+                                            candidate.roll_deg,
+                                            candidate.yaw_deg,
+                                            candidate.focal_scale});
+                  return stage2_seeds;
+                }(),
+                1.0, 5.0, "bounded_search_1deg");
+            // Ceres finalists around the refined winners (top-3 distinct).
+            std::vector<BoundedCandidate> finalist_pool = one_degree;
+            std::sort(finalist_pool.begin(), finalist_pool.end(),
+                      [&](const BoundedCandidate &a,
+                          const BoundedCandidate &b) {
+                        if (a.stage_gate_pass != b.stage_gate_pass)
+                          return a.stage_gate_pass;
+                        return a.objective < b.objective;
+                      });
+            std::vector<BoundedCandidate> chosen_finalists;
+            for (const auto &candidate : finalist_pool) {
+              if (!std::all_of(
+                      chosen_finalists.begin(), chosen_finalists.end(),
+                      [&](const BoundedCandidate &taken) {
+                        return circularYawDistanceDeg(
+                                   taken.yaw_deg, candidate.yaw_deg) >=
+                               kAnalyzerMinimumDistinctYawDeg;
+                      }))
+                continue;
+              chosen_finalists.push_back(candidate);
+              if (chosen_finalists.size() >= 3)
+                break;
+            }
+            for (const auto &seed : chosen_finalists) {
+              auto final_config = config;
+              final_config.enable_ceres_refinement = true;
+              final_config.use_coarse_yaw_bounds = true;
+              final_config.coarse_yaw_span_rad = 0.0;
+              final_config.coarse_yaw_step_rad = radians(1.0);
+              final_config.coarse_yaw_min_rad =
+                  radians(seed.yaw_deg - 1.0);
+              final_config.coarse_yaw_max_rad =
+                  radians(seed.yaw_deg + 1.0);
+              final_config.global_reference_visible_edge_points = 0;
+              final_config.global_reference_nid_projected_points = 0;
+              final_config.global_reference_edge_active_cells = 0;
+              final_config.global_reference_structural_length = 0;
+              final_config.minimum_relative_nid_coverage = 0.0;
+              auto final_result = auto_calib::calibrateExtrinsicMultiScene(
+                  calibration_observations, seed.prior, final_config);
+              applySelectionGates(&final_result,
+                                  minimum_structural_direction_groups,
+                                  maximum_camera_downward_deg);
+              ++bounded_orientation_evaluations;
+              const double final_objective =
+                  final_result.metrics.lidar_geometry_points > 0 &&
+                          std::isfinite(
+                              final_result.metrics.final_composite_objective)
+                      ? final_result.metrics.final_composite_objective
+                      : std::numeric_limits<double>::infinity();
+              const auto conf = auto_calib::evaluateMultiCriteriaConfidence(
+                  final_result, 1.0, final_config);
+              final_result.metrics.multi_criteria_confidence_score =
+                  conf.total_confidence;
+              const std::size_t final_index = results.size();
+              results.push_back(std::move(final_result));
+              priors.push_back(seed.prior);
+              candidate_downward_degrees.push_back(seed.down_deg);
+              candidate_optical_roll_degrees.push_back(seed.roll_deg);
+              candidate_focal_scales.push_back(seed.focal_scale);
+              auto final_candidate =
+                  resultJson(results.back(), seed.prior.translation_m.x(),
+                             seed.down_deg, seed.roll_deg, seed.focal_scale);
+              final_candidate["search_stage"] =
+                  "analyzer_bounded_ceres_finalist";
+              final_candidate["seed_yaw_deg"] = seed.yaw_deg;
+              final_candidate["stage_gate_pass"] = seed.stage_gate_pass;
+              final_candidate["multi_criteria_confidence_score"] =
+                  conf.total_confidence;
+              candidates.push_back(std::move(final_candidate));
+              staged_finalists.push_back(
+                  {final_index, 1.0});
+              search_stages.push_back(
+                  {{"stage", "analyzer_bounded_ceres_finalist"},
+                   {"seed_yaw_deg", seed.yaw_deg},
+                   {"seed_down_deg", seed.down_deg},
+                   {"seed_roll_deg", seed.roll_deg},
+                   {"candidate_index", final_index},
+                   {"multi_criteria_confidence_score",
+                    conf.total_confidence}});
+              (void)final_objective;
+            }
+            if (!results.empty()) {
+              analyzer_bounded_active = true;
+              search_stages.push_back(
+                  {{"stage", "analyzer_bounded_engaged"},
+                   {"orientation_evaluations",
+                    bounded_orientation_evaluations}});
+            } else {
+              analyzer_fallback_triggered = true;
+              search_stages.push_back(
+                  {{"stage", "analyzer_bounded_empty"},
+                   {"action", "fallback_to_full_b0_staged_search"}});
+            }
+          }
+        }
+      } catch (const std::exception &e) {
+        analyzer_fallback_triggered = true;
+        analyzer_report["error"] = e.what();
+        search_stages.push_back(
+            {{"stage", "analyzer_exception"},
+             {"action", "fallback_to_full_b0_staged_search"},
+             {"error", e.what()}});
+        std::cout << "orientation-analyzer: exception (" << e.what()
+                  << "); running full B0 staged search\n";
+      }
+    }
+
+    if (!analyzer_bounded_active) {
     for (double sign : signs) {
       for (double candidate_focal_scale : focal_scale_candidates) {
         auto candidate_observations = calibration_observations;
@@ -2682,6 +3016,7 @@ int main(int argc, char **argv) {
         }
       }
     }
+    } // if (!analyzer_bounded_active)
     auto score = [](const auto_calib::CalibrationResult &r) {
       return r.reason_code != "COARSE_OVERLAP_INSUFFICIENT" &&
                      r.metrics.lidar_geometry_points > 0 &&
@@ -2708,11 +3043,6 @@ int main(int argc, char **argv) {
               });
     std::size_t selected = ranking.front();
     double finalist_objective_margin = 1.0;
-    struct StagedFinalistRecord {
-      std::size_t result_index = 0;
-      double training_pass_ratio = 0.0;
-    };
-    std::vector<StagedFinalistRecord> staged_finalists;
     bool final_success = false;
     std::string final_reason = "SEARCH_NOT_REFINED";
     auto display_transform = results[selected].candidate_t_camera_lidar;
@@ -2735,7 +3065,6 @@ int main(int argc, char **argv) {
     BasinSelection basin;
     std::size_t basin_proposal = selected;
     nlohmann::json orientation_layers = nlohmann::json::array();
-    nlohmann::json search_stages = nlohmann::json::array();
     std::size_t global_max_visible_edges = 0;
     std::size_t global_max_nid_points = 0;
     std::size_t global_max_edge_cells = 0;
@@ -2764,6 +3093,7 @@ int main(int argc, char **argv) {
       }
     }
 
+    if (!analyzer_bounded_active) {
     if (staged_search) {
       struct LocalCandidate {
         auto_calib::CalibrationResult result;
@@ -3369,6 +3699,14 @@ int main(int argc, char **argv) {
                                {"candidate_index", selected},
                                {"selection", "no_fallback"}});
     }
+    } // if (!analyzer_bounded_active)
+    if (analyzer_bounded_active) {
+      basin.result_index = selected;
+      basin.yaw_deg =
+          results[selected].metrics.selected_multistart_yaw_deg;
+      basin.corrected_score = score(results[selected]);
+      basin.basin_count = staged_finalists.size();
+    }
     if (ranking.size() != results.size()) {
       ranking.resize(results.size());
       std::iota(ranking.begin(), ranking.end(), 0);
@@ -3390,7 +3728,8 @@ int main(int argc, char **argv) {
     final_success = !diagnostic_only && results[selected].success;
     final_reason = diagnostic_only
                        ? "SINGLE_OBSERVATION_DIAGNOSTIC_ONLY"
-                       : (staged_search && !std::isfinite(basin.corrected_score)
+                       : (staged_search && !analyzer_bounded_active &&
+                                  !std::isfinite(basin.corrected_score)
                               ? "COARSE_BASIN_NOT_FOUND"
                               : results[selected].reason_code);
     display_transform = results[selected].success
@@ -3693,6 +4032,12 @@ int main(int argc, char **argv) {
         {"yaw_step_deg", yaw_step_deg},
         {"down_step_deg", value(args, "--down-step-deg", 15.0)},
         {"orientation_candidates", orientation_score_count},
+        {"orientation_analyzer", analyzer_report},
+        {"orientation_analyzer_engaged", analyzer_bounded_active},
+        {"orientation_analyzer_fallback_triggered",
+         analyzer_fallback_triggered},
+        {"bounded_orientation_evaluations",
+         bounded_orientation_evaluations},
         {"raw_best_down_deg", raw_best_down},
         {"raw_best_yaw_deg", raw_best_yaw},
         {"raw_best_objective", raw_best_objective},

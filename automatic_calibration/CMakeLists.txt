@@ -14,7 +14,7 @@ find_package(Ceres REQUIRED)
 find_package(yaml-cpp REQUIRED)
 find_package(nlohmann_json REQUIRED)
 
-add_library(automatic_calibration_core src/synthetic_lidar.cpp src/calibration_core.cpp src/structural_orientation_analyzer.cpp)
+add_library(automatic_calibration_core src/synthetic_lidar.cpp src/calibration_core.cpp src/structural_orientation_analyzer.cpp src/image_vanishing_estimator.cpp src/lidar_manhattan_estimator.cpp)
 target_include_directories(automatic_calibration_core PUBLIC include)
 target_link_libraries(automatic_calibration_core PUBLIC Eigen3::Eigen opencv_core opencv_imgcodecs opencv_imgproc Ceres::ceres yaml-cpp nlohmann_json::nlohmann_json)
 target_compile_options(automatic_calibration_core PRIVATE -Wall -Wextra -Wpedantic)
