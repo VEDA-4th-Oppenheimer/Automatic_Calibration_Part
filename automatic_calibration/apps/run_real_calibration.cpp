@@ -2664,11 +2664,16 @@ int main(int argc, char **argv) {
     std::vector<StagedFinalistRecord> staged_finalists;
     nlohmann::json search_stages = nlohmann::json::array();
     constexpr double kAnalyzerMinimumDistinctYawDeg = 30.0;
+    constexpr double kAnalyzerConsensusYawDeg = 15.0;
+    constexpr double kAnalyzerConsensusDownDeg = 15.0;
     // ---- Orientation-analyzer guided bounded search (opt-in) ---------------
     // When the lightweight analyzer returns confident Top-3 proposals, the
     // brute-force 168-candidate coarse sweep is bypassed: a bounded search
     // (yaw +/-10 deg at 5 deg, then +/-5 deg at 1 deg, then Ceres) runs
-    // around the proposals. If the analyzer fails or every bounded candidate
+    // around the proposals. Every training scene must support a proposal
+    // within the circular yaw/down tolerances before it enters this search,
+    // preventing a confident scene-specific alias from becoming a false PASS.
+    // If the analyzer consensus fails or every bounded candidate
     // fails the absolute overlap gate, the full B0 staged search below runs
     // automatically as the fail-safe fallback.
     bool analyzer_bounded_active = false;
@@ -2681,44 +2686,130 @@ int main(int argc, char **argv) {
         !calibration_observations.empty()) {
       const fs::path analyzer_dir = output_dir / "orientation_analyzer";
       try {
-        const auto analyzer_result = auto_calib::analyzeHybridOrientation(
-            scans.front(), calibration_observations.front().bgr,
-            calibration_observations.front().camera);
-        auto_calib::writeHybridAnalyzerArtifacts(analyzer_result, analyzer_dir);
-        nlohmann::json analyzer_proposals_json = nlohmann::json::array();
-        for (const auto &p : analyzer_result.proposals)
-          analyzer_proposals_json.push_back({{"rank", p.rank},
-                                             {"yaw_deg", p.yaw_deg},
-                                             {"down_deg", p.down_deg},
-                                             {"roll_deg", p.roll_deg},
-                                             {"raw_score", p.raw_score},
-                                             {"basin_score", p.basin_score},
-                                             {"confidence", p.confidence},
-                                             {"yaw_sigma_deg", p.yaw_sigma_deg},
-                                             {"down_sigma_deg", p.down_sigma_deg},
-                                             {"roll_sigma_deg", p.roll_sigma_deg},
-                                             {"search_radius_deg",
-                                              p.search_radius_deg},
-                                             {"evidence", p.evidence}});
+        const auto proposals_json = [](const std::vector<
+                                           auto_calib::HybridOrientationProposal>
+                                           &proposals) {
+          nlohmann::json out = nlohmann::json::array();
+          for (const auto &p : proposals)
+            out.push_back({{"rank", p.rank},
+                           {"yaw_deg", p.yaw_deg},
+                           {"down_deg", p.down_deg},
+                           {"roll_deg", p.roll_deg},
+                           {"raw_score", p.raw_score},
+                           {"basin_score", p.basin_score},
+                           {"confidence", p.confidence},
+                           {"yaw_sigma_deg", p.yaw_sigma_deg},
+                           {"down_sigma_deg", p.down_sigma_deg},
+                           {"roll_sigma_deg", p.roll_sigma_deg},
+                           {"search_radius_deg", p.search_radius_deg},
+                           {"evidence", p.evidence}});
+          return out;
+        };
+        std::vector<auto_calib::HybridAnalyzerResult> analyzer_results;
+        analyzer_results.reserve(calibration_observations.size());
+        nlohmann::json analyzer_scenes_json = nlohmann::json::array();
+        double analyzer_runtime_ms = 0.0;
+        double minimum_analyzer_coverage = 1.0;
+        int evaluated_signature_yaws = 0;
+        int perspective_remaps = 0;
+        int expensive_projection_evaluations = 0;
+        for (std::size_t scene_index = 0;
+             scene_index < calibration_observations.size(); ++scene_index) {
+          auto result = auto_calib::analyzeHybridOrientation(
+              scans[scene_index], calibration_observations[scene_index].bgr,
+              calibration_observations[scene_index].camera);
+          const fs::path scene_dir =
+              scene_index == 0
+                  ? analyzer_dir
+                  : analyzer_dir / ("scene_" + std::to_string(scene_index));
+          auto_calib::writeHybridAnalyzerArtifacts(result, scene_dir);
+          analyzer_scenes_json.push_back(
+              {{"scene_index", scene_index},
+               {"scan", scans[scene_index].filename().string()},
+               {"status", result.status},
+               {"fallback_required", result.fallback_required},
+               {"fallback_reason", result.fallback_reason},
+               {"coverage", result.coverage},
+               {"runtime_ms", result.runtime_ms},
+               {"proposals", proposals_json(result.proposals)}});
+          analyzer_runtime_ms += result.runtime_ms;
+          minimum_analyzer_coverage =
+              std::min(minimum_analyzer_coverage, result.coverage);
+          evaluated_signature_yaws += result.evaluated_signature_yaws;
+          perspective_remaps += result.perspective_remaps;
+          expensive_projection_evaluations +=
+              result.expensive_projection_evaluations;
+          analyzer_results.push_back(std::move(result));
+        }
+
+        const auto &analyzer_result = analyzer_results.front();
+        std::vector<auto_calib::HybridOrientationProposal>
+            consensus_proposals;
+        std::string consensus_failure_reason;
+        for (const auto &result : analyzer_results) {
+          if (result.fallback_required || result.proposals.empty()) {
+            consensus_failure_reason = "SCENE_ANALYZER_FALLBACK";
+            break;
+          }
+        }
+        if (consensus_failure_reason.empty()) {
+          for (const auto &proposal : analyzer_result.proposals) {
+            bool supported_by_all_scenes = true;
+            for (std::size_t scene_index = 1;
+                 scene_index < analyzer_results.size(); ++scene_index) {
+              bool scene_supports_proposal = false;
+              for (const auto &candidate :
+                   analyzer_results[scene_index].proposals) {
+                if (circularYawDistanceDeg(proposal.yaw_deg,
+                                           candidate.yaw_deg) <=
+                        kAnalyzerConsensusYawDeg &&
+                    std::abs(proposal.down_deg - candidate.down_deg) <=
+                        kAnalyzerConsensusDownDeg) {
+                  scene_supports_proposal = true;
+                  break;
+                }
+              }
+              if (!scene_supports_proposal) {
+                supported_by_all_scenes = false;
+                break;
+              }
+            }
+            if (supported_by_all_scenes)
+              consensus_proposals.push_back(proposal);
+          }
+          if (consensus_proposals.empty())
+            consensus_failure_reason =
+                "MULTI_SCENE_PROPOSAL_INCONSISTENT";
+        }
+
+        const auto consensus_proposals_json =
+            proposals_json(consensus_proposals);
         analyzer_report = {
             {"mode", "hybrid"},
-            {"status", analyzer_result.status},
-            {"fallback_required", analyzer_result.fallback_required},
-            {"fallback_reason", analyzer_result.fallback_reason},
-            {"coverage", analyzer_result.coverage},
-            {"runtime_ms", analyzer_result.runtime_ms},
-            {"evaluated_signature_yaws",
-             analyzer_result.evaluated_signature_yaws},
-            {"perspective_remaps", analyzer_result.perspective_remaps},
+            {"status", consensus_failure_reason.empty()
+                           ? analyzer_result.status
+                           : "FALLBACK_REQUIRED"},
+            {"fallback_required", !consensus_failure_reason.empty()},
+            {"fallback_reason", consensus_failure_reason},
+            {"coverage", minimum_analyzer_coverage},
+            {"runtime_ms", analyzer_runtime_ms},
+            {"scene_count", analyzer_results.size()},
+            {"consensus_yaw_tolerance_deg", kAnalyzerConsensusYawDeg},
+            {"consensus_down_tolerance_deg", kAnalyzerConsensusDownDeg},
+            {"consensus_proposal_count", consensus_proposals.size()},
+            {"scenes", analyzer_scenes_json},
+            {"evaluated_signature_yaws", evaluated_signature_yaws},
+            {"perspective_remaps", perspective_remaps},
             {"expensive_projection_evaluations",
-             analyzer_result.expensive_projection_evaluations},
-            {"proposals", analyzer_proposals_json}};
+             expensive_projection_evaluations},
+            {"reference_scene_proposals",
+             proposals_json(analyzer_result.proposals)},
+            {"proposals", consensus_proposals_json}};
 
-        if (analyzer_result.fallback_required ||
-            analyzer_result.proposals.empty()) {
+        if (!consensus_failure_reason.empty()) {
           analyzer_fallback_triggered = true;
           std::cout << "orientation-analyzer: fallback_required ("
-                    << analyzer_result.fallback_reason
+                    << consensus_failure_reason
                     << "); running full B0 staged search\n";
         } else {
           struct BoundedSeed {
@@ -2729,7 +2820,7 @@ int main(int argc, char **argv) {
             double focal_scale = focal_scale;
           };
           std::vector<BoundedSeed> seeds;
-          for (const auto &p : analyzer_result.proposals) {
+          for (const auto &p : consensus_proposals) {
             const double sign = explicit_camera_center ? 1.0 : 1.0;
             const double down_sigma =
                 std::clamp(p.down_sigma_deg, 3.0, 15.0);

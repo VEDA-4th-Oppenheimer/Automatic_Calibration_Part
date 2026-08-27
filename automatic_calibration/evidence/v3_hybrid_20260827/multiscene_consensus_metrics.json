@@ -1,0 +1,88 @@
+{
+  "schema_version": "1.0",
+  "date": "2026-08-27",
+  "branch": "codex/exp-hybrid-analyzer-v3-20260827",
+  "baseline": {
+    "branch": "develop",
+    "commit": "f684cd66c036b85d6a97e35d8706288c3b089355",
+    "orientation_candidates": 168,
+    "ground_truth_policy": "diagnostic_oracle_not_independent_ground_truth"
+  },
+  "consensus_policy": {
+    "training_scenes": "all",
+    "yaw_distance": "circular",
+    "yaw_tolerance_deg": 15.0,
+    "down_tolerance_deg": 15.0,
+    "empty_consensus_action": "full_b0_fallback"
+  },
+  "jenkins_build22_24": {
+    "output": "automatic_calibration/generated/v3_case_c_build22_24_multiscene_consensus",
+    "training_scene_count": 2,
+    "holdout_scene_count": 1,
+    "consensus_proposal_count": 2,
+    "analyzer_fallback_triggered": false,
+    "status": "CANDIDATE_RT",
+    "reason": "PASS",
+    "pipeline_runtime_ms": 53494.429041,
+    "analyzer_runtime_ms": 3044.547191,
+    "analyzer_runtime_fraction": 0.0569133505,
+    "bounded_internal_yaw_candidates": 32,
+    "bounded_projection_scene_evaluations": 64,
+    "projection_reduction_vs_b0": 0.8095238095,
+    "estimated_orientation_deg": {
+      "yaw": 178.250741,
+      "down": 42.560687,
+      "roll": 0.022565
+    },
+    "rotation_geodesic_from_b0_deg": 2.394334,
+    "translation_from_b0_mm": 4.155
+  },
+  "repeat_20260818": {
+    "output": "automatic_calibration/generated/v3_repeat_20260818_multiscene_consensus",
+    "training_scene_count": 3,
+    "holdout_scene_count": 1,
+    "consensus_proposal_count": 0,
+    "analyzer_fallback_triggered": true,
+    "analyzer_fallback_reason": "MULTI_SCENE_PROPOSAL_INCONSISTENT",
+    "status": "FAIL",
+    "reason": "FINALIST_AMBIGUOUS",
+    "pipeline_runtime_ms": 1221273.054212,
+    "analyzer_runtime_ms": 4460.510288,
+    "analyzer_runtime_fraction": 0.0036523448,
+    "bounded_internal_yaw_candidates": 0,
+    "bounded_projection_scene_evaluations": 0,
+    "fallback_candidate_search_metadata_deg": {
+      "yaw": 175.0,
+      "down": 20.006716,
+      "roll": 3.0
+    },
+    "unsafe_candidate_before_consensus": {
+      "status": "CANDIDATE_RT",
+      "reason": "PASS",
+      "yaw_deg": -49.062117,
+      "down_deg": 32.672996,
+      "roll_deg": 9.546764,
+      "rotation_geodesic_from_b0_deg": 145.521652,
+      "translation_from_b0_mm": 117.076246
+    },
+    "fallback_candidate_from_prior_b0": {
+      "rotation_geodesic_deg": 6.379707,
+      "translation_mm": 7.202659,
+      "activation_allowed": false
+    }
+  },
+  "acceptance": {
+    "standalone_basin_recall_at_3": 0.5,
+    "basin_recall_at_3_ge_0_99": false,
+    "e2e_unsafe_non_fallback_count": 0,
+    "zero_unsafe_non_fallback": true,
+    "fallback_rate": 0.5,
+    "fallback_rate_le_0_20": false,
+    "analyzer_fraction_le_0_10": true,
+    "projection_reduction_ge_0_70": true,
+    "rotation_within_1_to_2_deg": false,
+    "three_installation_configurations": false,
+    "installation_configuration_coverage": "2/3",
+    "product_approved_rt": false
+  }
+}

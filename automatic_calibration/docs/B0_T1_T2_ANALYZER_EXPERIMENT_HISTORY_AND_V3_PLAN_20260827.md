@@ -1,3 +1,7 @@
+> **최신 상태(2026-08-27 r5):** 초기 V3의 단일 장면 false acceptance를 막기 위해
+> multi-scene yaw/down consensus와 fail-closed B0 fallback을 구현·검증했다.
+> 최신 수치와 판정은 `V3_MULTI_SCENE_CONSENSUS_REMEDIATION_REPORT_20260827.md`를 우선한다.
+
 # B0·T1·T2 Analyzer 실험 이력과 V3 Hybrid 설계
 
 - 작성일: 2026-08-27

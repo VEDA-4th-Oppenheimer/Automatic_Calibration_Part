@@ -1,3 +1,7 @@
+> **후속 보정 안내:** 이 문서의 r1~r4 결과는 이력으로 보존한다. r5에서는 모든 training
+> scene의 yaw/down 후보 합의를 요구하도록 변경했다. 최신 구현·실행 결과와 합격 기준은
+> `V3_MULTI_SCENE_CONSENSUS_REMEDIATION_REPORT_20260827.md`를 우선한다.
+
 # V3 Hybrid Analyzer 구현·실행 보고서
 
 - 작성일: 2026-08-27

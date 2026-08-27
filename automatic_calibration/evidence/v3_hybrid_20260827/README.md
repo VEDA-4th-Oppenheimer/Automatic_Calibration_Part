@@ -1,3 +1,6 @@
+> r5 multi-scene consensus의 최신 요약 수치는 `multiscene_consensus_metrics.json`에 있다.
+> 기존 `case_c_r4_metrics.json`은 보정 전 이력으로 삭제하지 않는다.
+
 # V3 Hybrid Analyzer evidence
 
 작성일: 2026-08-27
