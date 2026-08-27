@@ -1,0 +1,18 @@
+{
+  "schema_version": "2.0",
+  "mode": "panorama",
+  "status": "INSUFFICIENT_FEATURES",
+  "input_rows": 101,
+  "input_columns": 400,
+  "coverage": 0.9947524752,
+  "peak_to_sidelobe_ratio": 0,
+  "yaw_bins": 36,
+  "down_bins": 6,
+  "evaluated_candidates": 216,
+  "proposal_count": 0,
+  "proposals": [],
+  "fallback_required": true,
+  "fallback_reason": "NO_DISTINCT_STRUCTURAL_PEAKS",
+  "runtime_ms": 1148.466692,
+  "activation_allowed": false
+}

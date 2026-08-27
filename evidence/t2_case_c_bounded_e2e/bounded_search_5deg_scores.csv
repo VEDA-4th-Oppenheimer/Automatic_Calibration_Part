@@ -1,0 +1,4 @@
+seed,down_deg,roll_deg,yaw_center_deg,yaw_deg,objective,reason_code,stage_gate_pass
+0,20,0,170,175,0.83944025507,COARSE_SCORE_ONLY,1
+1,45,0,-145,-155,0.880721840349,COARSE_SCORE_ONLY,1
+2,40,0,90,85,0.798693951371,COARSE_SCORE_ONLY,1

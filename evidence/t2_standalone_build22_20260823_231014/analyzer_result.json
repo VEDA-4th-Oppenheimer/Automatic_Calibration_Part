@@ -1,0 +1,21 @@
+{
+  "schema_version": "2.0",
+  "mode": "panorama",
+  "status": "PROPOSALS_READY",
+  "input_rows": 101,
+  "input_columns": 400,
+  "coverage": 0.9947524752,
+  "peak_to_sidelobe_ratio": 1.250457458,
+  "yaw_bins": 36,
+  "down_bins": 6,
+  "evaluated_candidates": 216,
+  "proposal_count": 3,
+  "proposals": [
+    {"rank": 1, "yaw_deg": 177.5, "down_deg": 25, "roll_deg": 0, "raw_score": 0.6808415653, "normalized_score": 1, "confidence": 0.559841379, "search_radius_deg": 10, "evidence": "PERSPECTIVE_CHAMFER,PANORAMA_REMAP"},
+    {"rank": 2, "yaw_deg": -142.5, "down_deg": 40, "roll_deg": 0, "raw_score": 0.6647760143, "normalized_score": 0.9764033929, "confidence": 0.4994378076, "search_radius_deg": 10, "evidence": "PERSPECTIVE_CHAMFER,PANORAMA_REMAP"},
+    {"rank": 3, "yaw_deg": 90, "down_deg": 40, "roll_deg": 0, "raw_score": 0.6446025702, "normalized_score": 0.9467732334, "confidence": 0.4235892993, "search_radius_deg": 10, "evidence": "PERSPECTIVE_CHAMFER,PANORAMA_REMAP"}],
+  "fallback_required": false,
+  "fallback_reason": "",
+  "runtime_ms": 3157.353147,
+  "activation_allowed": false
+}
