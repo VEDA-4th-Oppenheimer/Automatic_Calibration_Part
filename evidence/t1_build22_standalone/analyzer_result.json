@@ -1,0 +1,22 @@
+{
+  "schema_version": "2.0",
+  "mode": "structural",
+  "status": "PROPOSALS_READY",
+  "input_rows": 101,
+  "input_columns": 400,
+  "line_count": 332,
+  "normal_count": 31479,
+  "camera_direction_count": 3,
+  "candidate_rotation_count": 48,
+  "projected_edge_points": 42908,
+  "lidar_wall2_synthetic": false,
+  "proposal_count": 3,
+  "proposals": [
+    {"rank": 1, "yaw_deg": 18.9276979, "down_deg": 13.1814958, "roll_deg": -64.18627158, "raw_score": 0.7791006965, "normalized_score": 1, "confidence": 0.7791006965, "search_radius_deg": 10, "evidence": ["MANHATTAN_SVD", "WAHBA_SVD", "PROJECTED_CHAMFER"]},
+    {"rank": 2, "yaw_deg": 173.075996, "down_deg": -1.657824631, "roll_deg": -63.66919874, "raw_score": 0.7221679581, "normalized_score": 0.9269250578, "confidence": 0.7221679581, "search_radius_deg": 10, "evidence": ["MANHATTAN_SVD", "WAHBA_SVD", "PROJECTED_CHAMFER"]},
+    {"rank": 3, "yaw_deg": 34.60646633, "down_deg": -21.41229684, "roll_deg": -159.5432637, "raw_score": 0.6631069364, "normalized_score": 0.8511183977, "confidence": 0.6631069364, "search_radius_deg": 10, "evidence": ["MANHATTAN_SVD", "WAHBA_SVD", "PROJECTED_CHAMFER"]}],
+  "fallback_required": false,
+  "fallback_reason": "",
+  "runtime_ms": 1475.840032,
+  "activation_allowed": false
+}
