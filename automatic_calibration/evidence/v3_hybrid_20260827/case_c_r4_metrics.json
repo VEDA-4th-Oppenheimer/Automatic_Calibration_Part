@@ -1,0 +1,64 @@
+{
+  "schema_version": "1.0",
+  "date": "2026-08-27",
+  "branch": "codex/exp-hybrid-analyzer-v3-20260827",
+  "baseline": {
+    "branch": "develop",
+    "commit": "f684cd66c036b85d6a97e35d8706288c3b089355",
+    "orientation_candidates": 168,
+    "yaw_deg": 177.0,
+    "down_deg": 42.0,
+    "roll_deg": 3.0
+  },
+  "standalone": {
+    "configuration_count": 2,
+    "pair_count": 6,
+    "recall_at_3_count": 3,
+    "recall_at_3_rate": 0.5,
+    "fallback_count": 0,
+    "unsafe_non_fallback_count": 3,
+    "runtime_ms_mean": 2623.364862,
+    "runtime_ms_min": 2098.018080,
+    "runtime_ms_max": 3274.942285
+  },
+  "case_c_r4": {
+    "status": "CANDIDATE_RT",
+    "reason": "PASS",
+    "analyzer_fallback_triggered": false,
+    "pipeline_runtime_ms": 76166.329254,
+    "analyzer_runtime_ms": 1861.041071,
+    "analyzer_runtime_fraction": 0.024433,
+    "evaluated_signature_yaws": 360,
+    "perspective_remaps": 0,
+    "analyzer_expensive_projection_evaluations": 0,
+    "bounded_internal_orientation_candidates": 48,
+    "bounded_projection_scene_evaluations": 96,
+    "projection_reduction_vs_b0": 0.714286,
+    "estimated_orientation_deg": {
+      "yaw": 178.250741,
+      "down": 42.560687,
+      "roll": 0.022565
+    },
+    "rotation_geodesic_from_b0_deg": 2.394334,
+    "translation_from_b0_mm": 4.155,
+    "estimated_t_camera_lidar": {
+      "rotation_matrix": [
+        [-0.9995420398, -0.0002900879, 0.0302593206],
+        [0.0202529512, 0.7365612899, 0.6760675145],
+        [-0.0224839633, 0.6763707430, -0.7362180991]
+      ],
+      "translation_m": [0.0592322080, 0.0585005036, 0.0561621372]
+    }
+  },
+  "acceptance": {
+    "basin_recall_at_3_ge_0_99": false,
+    "zero_correct_basin_misses": false,
+    "fallback_rate_le_0_20": true,
+    "fallback_rate_interpretation": "not accepted because three missed basins did not trigger fallback",
+    "analyzer_fraction_le_0_10": true,
+    "projection_reduction_ge_0_70": true,
+    "rotation_within_1_to_2_deg": false,
+    "three_installation_configurations": false,
+    "installation_configuration_coverage": "2/3"
+  }
+}

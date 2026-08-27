@@ -8,6 +8,7 @@
 
 # Native build trees
 build/
+build-*/
 **/build/
 
 # Local Docker-only development files

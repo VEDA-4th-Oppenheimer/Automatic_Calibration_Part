@@ -1,0 +1,7 @@
+environment_configuration,case,reference_yaw_deg,status,fallback_required,runtime_ms,rank1_yaw_deg,recall_at_3,minimum_basin_error_deg
+A,repeat_20260818_0,169.0,PROPOSALS_READY,false,2098.018080,-44.0,0,11.0
+A,repeat_20260818_1,169.0,PROPOSALS_READY,false,2416.810649,-50.0,0,42.0
+A,repeat_20260818_2,169.0,PROPOSALS_READY,false,2445.846349,-51.0,0,15.0
+B,jenkins_build22,177.0,PROPOSALS_READY,false,3274.942285,-134.0,1,2.0
+B,jenkins_build23,177.0,PROPOSALS_READY,false,2850.499695,-177.0,1,6.0
+B,jenkins_build24,177.0,PROPOSALS_READY,false,2654.072114,177.0,1,0.0
