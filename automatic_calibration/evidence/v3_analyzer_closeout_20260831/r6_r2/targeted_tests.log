@@ -1,0 +1,9 @@
+Test project /workspace/build
+    Start 2: automatic_calibration_core_tests
+1/2 Test #2: automatic_calibration_core_tests ....   Passed    5.85 sec
+    Start 3: hybrid_orientation_analyzer_tests
+2/2 Test #3: hybrid_orientation_analyzer_tests ...   Passed    0.16 sec
+
+100% tests passed, 0 tests failed out of 2
+
+Total Test time (real) =   6.06 sec

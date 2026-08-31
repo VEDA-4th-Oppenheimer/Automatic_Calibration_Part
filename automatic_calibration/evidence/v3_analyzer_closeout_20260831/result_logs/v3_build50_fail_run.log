@@ -1,0 +1,1096 @@
+{
+  "absolute_support_pass": true,
+  "acquisition_condition": "operator_confirmed_same_time_same_pose_static_scene",
+  "activation_allowed": false,
+  "active_intrinsics": {
+    "cx": 1337.029701465088,
+    "cy": 745.3700555812936,
+    "fx": 2033.9019520107618,
+    "fy": 2037.7796376946073,
+    "resolution": [
+      2592,
+      1520
+    ]
+  },
+  "algorithm": {
+    "ambiguity_margin": 0.02,
+    "camera_center_prior_sigma_m": 0.005,
+    "camera_feature": "gradient_magnitude",
+    "candidate_visibility": "quarter_resolution_z_buffer_10mm",
+    "coarse_overlap_gate": "visible_edge>=100, nid_projected>=100 per observation, and configured structural direction support",
+    "coverage_grid": [
+      3,
+      4
+    ],
+    "coverage_penalty_weight": 0.25,
+    "direction_prior_weight": 0.0,
+    "edge_weight": 0.25,
+    "expected_camera_down_lidar": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "expected_camera_forward_lidar": [
+      0.0,
+      0.0,
+      0.0
+    ],
+    "finalist_confidence_margin": 0.0,
+    "finalist_objective_margin": 1.0,
+    "flat_geometry_rejection": "structural_score<0.05",
+    "geometry_nid_channels": "range_discontinuity_and_surface_normal_change_scored_separately",
+    "geometry_nid_spatial_grid": [
+      2,
+      2
+    ],
+    "horizontal_plane_axis": "+Y_down_from_IMU_gated_lidar_frame",
+    "lidar_edge_minimum_local_contrast_ratio": 2.0,
+    "lidar_edge_policy": "absolute_relative_threshold_plus_local_contrast_and_coplanar_rejection",
+    "lidar_feature": "range_discontinuity_and_surface_normal_change",
+    "manhattan_direction_feature": "LSD_vanishing_directions_plus_lidar_gravity_and_wall_axes",
+    "manhattan_direction_weight": 0.15,
+    "manhattan_image_feature_prior_policy": "fixed_per_finalist_training_seed_prior_reused_for_training_and_holdout",
+    "maximum_camera_downward_deg": 75.0,
+    "maximum_manhattan_vanishing_directions": 12,
+    "maximum_manhattan_vertical_error_deg": 20.0,
+    "maximum_plane_intersection_boundary_distance_m": 0.1,
+    "maximum_plane_rms_error_m": 0.03,
+    "minimum_finalist_confidence_margin": 0.02,
+    "minimum_manhattan_vertical_inliers": 3,
+    "minimum_nid_active_spatial_cells": 2,
+    "minimum_nid_feature_entropy_ratio": 0.08,
+    "minimum_nid_tile_points": 25,
+    "minimum_plane_points": 80,
+    "minimum_relative_edge_spatial_coverage": 0.5,
+    "minimum_relative_nid_coverage": 0.5,
+    "minimum_structural_direction_groups": 2,
+    "nid_weight": 0.55,
+    "occlusion_edge_policy": "single_scan_candidates_debug_only_repeated_segments_calibration",
+    "plane_normal_threshold_deg": 14.999999999999998,
+    "plane_pair_neighbor_radius_cells": 3,
+    "plane_postprocessing": "neighbor_reassignment_plus_adjacent_coplanar_merge_plus_IMU_Y_height_clustering",
+    "refinement": "fixed_visible_set_soft_histogram_NID_plus_edge_distance",
+    "relative_coverage_policy": "edge support is a soft penalty; NID relative support is a hard gate only inside each staged local yaw window and a soft global finalist score; spatial support remains a hard gate",
+    "signal_nmi_feature": "log_signal_plus_range_squared_minus_incidence_then_range_bin_median_MAD_normalization",
+    "signal_nmi_policy": "diagnostic_only_until_manual_RT_perturbation_conformance",
+    "signal_nmi_weight": 0.0,
+    "structural_direction_weight": 0.25,
+    "structural_endpoint_weight": 0.35,
+    "structural_line_feature": "LSD_2D_segments_plus_plane_intersections_plane_boundaries_and_persistent_occlusions",
+    "structural_line_residual": "one_to_one_direction_endpoint_distance_finite_overlap",
+    "structural_line_weight": 0.2,
+    "structural_overlap_weight": 0.25,
+    "yaw_multistart_step_deg": 15.0,
+    "yaw_neighbor_topology": "circular",
+    "yaw_search_max_deg": 165.0,
+    "yaw_search_min_deg": -180.0
+  },
+  "allow_intrinsic_refinement": false,
+  "ambiguous_separated_holdout_competitors": 0,
+  "baseline_m": null,
+  "basin_proposal_candidate": 0,
+  "camera_center_lidar_m": [
+    0.0,
+    -0.08105,
+    0.0
+  ],
+  "camera_channel": 1,
+  "camera_profile_policy": "manual_charuco_KD_fixed",
+  "candidate_gate_reason_code": "OBJECTIVE_IMPROVEMENT_INSUFFICIENT",
+  "candidate_intrinsics": {
+    "cx": 1337.029701465088,
+    "cy": 745.3700555812936,
+    "fx": 2033.9019520107618,
+    "fy": 2037.7796376946073,
+    "resolution": [
+      2592,
+      1520
+    ]
+  },
+  "candidate_results": [
+    {
+      "candidate_available": true,
+      "candidate_intrinsics": {
+        "cx": 1337.029701465088,
+        "cy": 745.3700555812936,
+        "fx": 2033.9019520107618,
+        "fy": 2037.7796376946073,
+        "resolution": [
+          2592,
+          1520
+        ]
+      },
+      "diagnostic_candidate": {
+        "rotation_matrix": [
+          [
+            -0.8792998725846414,
+            -0.028124599031592395,
+            -0.47543742070008066
+          ],
+          [
+            -0.31763595324228555,
+            0.7784532482808801,
+            0.5414036769812443
+          ],
+          [
+            0.3548790431689338,
+            0.6270722025175881,
+            -0.6934272258494347
+          ]
+        ],
+        "translation_m": [
+          -0.0022733677310391056,
+          0.06309818423477229,
+          0.050827356900993124
+        ]
+      },
+      "estimated": {
+        "rotation_matrix": [
+          [
+            1.0,
+            0.0,
+            0.0
+          ],
+          [
+            0.0,
+            0.7706446570516898,
+            -0.6372651038286055
+          ],
+          [
+            0.0,
+            0.6372651038286055,
+            0.7706446570516898
+          ]
+        ],
+        "translation_m": [
+          0.0,
+          0.06246074945403946,
+          0.05165033666530847
+        ]
+      },
+      "estimated_intrinsics": {
+        "cx": 1337.029701465088,
+        "cy": 745.3700555812936,
+        "fx": 2033.9019520107618,
+        "fy": 2037.7796376946073,
+        "resolution": [
+          2592,
+          1520
+        ]
+      },
+      "focal_scale": 1.0,
+      "internal_gate_pass": false,
+      "metrics": {
+        "absolute_support_pass": true,
+        "asymmetric_structural_weight": 16.464631994706572,
+        "camera_edge_pixels": 73670,
+        "camera_structural_lines": 47,
+        "coverage_objective": 0.00015745180581295634,
+        "edge_active_spatial_cells": 12,
+        "edge_coverage_ratio": 1.00354609929078,
+        "edge_spatial_coverage_ratio": 1.0,
+        "final_composite_objective": 0.9256836358446656,
+        "final_horizontal_structural_objective": 0.851581109016802,
+        "final_manhattan_horizontal_error_deg": 32.11099261664368,
+        "final_manhattan_objective": 0.8355782511458103,
+        "final_manhattan_vertical_error_deg": 2.406941884826036,
+        "final_mean_edge_distance_px": 21.21794005789611,
+        "final_nid": 0.9211314548493313,
+        "final_normal_entropy_ratio": 0.7419024488840249,
+        "final_normal_nid": 0.9217679056374736,
+        "final_range_entropy_ratio": 0.6217286013866488,
+        "final_range_nid": 0.9204950040611891,
+        "final_signal_entropy_ratio": 0.781654710798124,
+        "final_signal_nmi": 0.9482388710831586,
+        "final_vertical_structural_objective": 0.8463718181377948,
+        "finalist_confidence_margin": 0.0,
+        "global_edge_coverage_ratio": 1.00354609929078,
+        "global_nid_coverage_ratio": 0.9785575048732943,
+        "ground_height_m": 1.9106160032398283,
+        "ground_normal_valid": true,
+        "ground_tilt_deg": 43.431717842180454,
+        "horizontal_structural_matches": 4,
+        "initial_composite_objective": 0.9397630884258943,
+        "initial_manhattan_objective": 0.25437828795958856,
+        "initial_mean_edge_distance_px": 24.556466292803606,
+        "initial_nid": 0.9578757808023369,
+        "initial_signal_nmi": 0.9569657544036936,
+        "lidar_edge_points": 3551,
+        "lidar_geometry_points": 4553,
+        "lidar_occlusion_segments": 281,
+        "lidar_planes": 14,
+        "lidar_signal_points": 5000,
+        "lidar_structural_segments": 56,
+        "manhattan_horizontal_axes": 2,
+        "manhattan_vertical_inliers": 20,
+        "max_coarse_edge_active_spatial_cells": 12,
+        "max_coarse_nid_projected_points": 513,
+        "max_coarse_visible_edge_points": 564,
+        "multi_criteria_confidence_score": 0.7675605109592898,
+        "multistart_candidates": 3,
+        "multistart_objective_margin": 1.0,
+        "nid_active_spatial_cells": 8,
+        "nid_coverage_ratio": 0.9785575048732943,
+        "nid_improvement_ratio": 0.038360220280575175,
+        "nid_projected_points": 502,
+        "objective_improvement_ratio": 0.014981916990176524,
+        "occluded_edge_points": 0,
+        "projected_edge_points": 245,
+        "projected_ratio": 0.43286219081272087,
+        "runtime_ms": 6319.968585,
+        "selected_multistart_yaw_deg": -152.00000000000003,
+        "signal_nmi_active_spatial_cells": 4,
+        "signal_nmi_improvement_ratio": 0.009119326663860467,
+        "signal_nmi_projected_points": 513,
+        "solver_iterations": 29,
+        "structural_matched_segments": 19,
+        "structural_projected_points": 19,
+        "structural_visible_segments": 19,
+        "tesl_ratio": 1.0,
+        "total_explained_structural_length": 3156.880780106841,
+        "vertical_structural_matches": 15,
+        "visible_edge_points": 566
+      },
+      "multi_criteria_confidence_score": 0.7675605109592898,
+      "prior_downward_deg": 39.58818616494307,
+      "prior_optical_roll_deg": 0.0,
+      "prior_translation_x_m": 0.0,
+      "rank": 1,
+      "reason_code": "OBJECTIVE_IMPROVEMENT_INSUFFICIENT",
+      "search_stage": "analyzer_bounded_ceres_finalist",
+      "seed_yaw_deg": -152.00000000000003,
+      "solver_summary": "Ceres Solver Report: Iterations: 29, Initial cost: 4.029990e-01, Final cost: 3.902447e-01, Termination: CONVERGENCE",
+      "stage_gate_pass": true,
+      "state": "INTERNAL_GATE_FAIL",
+      "success": false,
+      "top_candidate_visualization": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/top_candidates/rank_1.png"
+    },
+    {
+      "candidate_available": true,
+      "candidate_intrinsics": {
+        "cx": 1337.029701465088,
+        "cy": 745.3700555812936,
+        "fx": 2033.9019520107618,
+        "fy": 2037.7796376946073,
+        "resolution": [
+          2592,
+          1520
+        ]
+      },
+      "diagnostic_candidate": {
+        "rotation_matrix": [
+          [
+            0.9957413796523324,
+            0.04111510641707621,
+            -0.08251456157783307
+          ],
+          [
+            -0.0694618815097349,
+            0.9230822146448017,
+            -0.37827803534381416
+          ],
+          [
+            0.06061478256330757,
+            0.3823987095045705,
+            0.9220070905931483
+          ]
+        ],
+        "translation_m": [
+          0.003329885889062086,
+          0.07462067795312836,
+          0.031461733534697715
+        ]
+      },
+      "estimated": {
+        "rotation_matrix": [
+          [
+            0.9972232814146033,
+            -0.07270201261491377,
+            0.016128991488369347
+          ],
+          [
+            0.07446963813992231,
+            0.973552999533426,
+            -0.21598340235948224
+          ],
+          [
+            0.0,
+            0.2165847973917142,
+            0.9762638093972296
+          ]
+        ],
+        "translation_m": [
+          -0.005892498122438761,
+          0.07890647061218417,
+          0.017554197828598437
+        ]
+      },
+      "estimated_intrinsics": {
+        "cx": 1337.029701465088,
+        "cy": 745.3700555812936,
+        "fx": 2033.9019520107618,
+        "fy": 2037.7796376946073,
+        "resolution": [
+          2592,
+          1520
+        ]
+      },
+      "focal_scale": 1.0,
+      "internal_gate_pass": false,
+      "metrics": {
+        "absolute_support_pass": false,
+        "asymmetric_structural_weight": 0.0,
+        "camera_edge_pixels": 73670,
+        "camera_structural_lines": 47,
+        "coverage_objective": 0.6944033530571992,
+        "edge_active_spatial_cells": 0,
+        "edge_coverage_ratio": 0.0,
+        "edge_spatial_coverage_ratio": 0.0,
+        "final_composite_objective": 0.9222825100931087,
+        "final_horizontal_structural_objective": -1.0,
+        "final_manhattan_horizontal_error_deg": 10.633329752218897,
+        "final_manhattan_objective": 0.8762376333856394,
+        "final_manhattan_vertical_error_deg": 17.352210804472353,
+        "final_mean_edge_distance_px": 0.0,
+        "final_nid": 0.8709931915201623,
+        "final_normal_entropy_ratio": 0.8767530811179027,
+        "final_normal_nid": 0.8709931915201623,
+        "final_range_entropy_ratio": 0.0,
+        "final_range_nid": -1.0,
+        "final_signal_entropy_ratio": 0.8615904104774255,
+        "final_signal_nmi": 0.9434478889061708,
+        "final_vertical_structural_objective": -1.0,
+        "finalist_confidence_margin": 0.0,
+        "global_edge_coverage_ratio": 0.0,
+        "global_nid_coverage_ratio": 0.7115384615384616,
+        "ground_height_m": 1.9105666458529875,
+        "ground_normal_valid": true,
+        "ground_tilt_deg": 17.969899900265794,
+        "horizontal_structural_matches": 0,
+        "initial_composite_objective": 0.9395384613708158,
+        "initial_manhattan_objective": 1.770782477703984,
+        "initial_mean_edge_distance_px": 2.610213726758957,
+        "initial_nid": 0.9261913872050294,
+        "initial_signal_nmi": 0.9522463040127996,
+        "lidar_edge_points": 3551,
+        "lidar_geometry_points": 4553,
+        "lidar_occlusion_segments": 281,
+        "lidar_planes": 14,
+        "lidar_signal_points": 5000,
+        "lidar_structural_segments": 56,
+        "manhattan_horizontal_axes": 2,
+        "manhattan_vertical_inliers": 20,
+        "max_coarse_edge_active_spatial_cells": 3,
+        "max_coarse_nid_projected_points": 156,
+        "max_coarse_visible_edge_points": 71,
+        "multi_criteria_confidence_score": 0.5934541993509679,
+        "multistart_candidates": 3,
+        "multistart_objective_margin": 1.0,
+        "nid_active_spatial_cells": 2,
+        "nid_coverage_ratio": 0.7115384615384616,
+        "nid_improvement_ratio": 0.059596964998172595,
+        "nid_projected_points": 111,
+        "objective_improvement_ratio": 0.018366412858213492,
+        "occluded_edge_points": 0,
+        "projected_edge_points": 0,
+        "projected_ratio": 0.0,
+        "runtime_ms": 3129.080428,
+        "selected_multistart_yaw_deg": 3.0000000000000004,
+        "signal_nmi_active_spatial_cells": 3,
+        "signal_nmi_improvement_ratio": 0.00923964216983777,
+        "signal_nmi_projected_points": 313,
+        "solver_iterations": 18,
+        "structural_matched_segments": 0,
+        "structural_projected_points": 0,
+        "structural_visible_segments": 0,
+        "tesl_ratio": 0.0,
+        "total_explained_structural_length": 0.0,
+        "vertical_structural_matches": 0,
+        "visible_edge_points": 0
+      },
+      "multi_criteria_confidence_score": 0.5934541993509679,
+      "prior_downward_deg": 12.508520506323407,
+      "prior_optical_roll_deg": 4.270749589425234,
+      "prior_translation_x_m": -0.005892498122438761,
+      "rank": 2,
+      "reason_code": "RELATIVE_COVERAGE_INSUFFICIENT",
+      "search_stage": "analyzer_bounded_ceres_finalist",
+      "seed_yaw_deg": 3.0000000000000004,
+      "solver_summary": "Ceres Solver Report: Iterations: 18, Initial cost: 4.742083e-01, Final cost: 3.776973e-01, Termination: CONVERGENCE",
+      "stage_gate_pass": false,
+      "state": "INTERNAL_GATE_FAIL",
+      "success": false,
+      "top_candidate_visualization": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/top_candidates/rank_2.png"
+    }
+  ],
+  "candidate_rt_status": "NOT_CANDIDATE_RT",
+  "ceres_execution_policy": "up_to_3_distinct_yaw_finalists",
+  "debug_output": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/debug",
+  "diagnostic_candidate_t_camera_lidar": {
+    "rotation_matrix": [
+      [
+        -0.8792998725846414,
+        -0.028124599031592395,
+        -0.47543742070008066
+      ],
+      [
+        -0.31763595324228555,
+        0.7784532482808801,
+        0.5414036769812443
+      ],
+      [
+        0.3548790431689338,
+        0.6270722025175881,
+        -0.6934272258494347
+      ]
+    ],
+    "translation_m": [
+      -0.0022733677310391056,
+      0.06309818423477229,
+      0.050827356900993124
+    ]
+  },
+  "diagnostic_only": false,
+  "distortion_application": "manual_intrinsic_undistort",
+  "downward_direction_candidates_deg": [
+    0.0,
+    15.0,
+    30.0,
+    45.0,
+    60.0,
+    75.0,
+    90.0
+  ],
+  "estimated_t_camera_lidar": {
+    "rotation_matrix": [
+      [
+        1.0,
+        0.0,
+        0.0
+      ],
+      [
+        0.0,
+        0.7706446570516898,
+        -0.6372651038286055
+      ],
+      [
+        0.0,
+        0.6372651038286055,
+        0.7706446570516898
+      ]
+    ],
+    "translation_m": [
+      0.0,
+      0.06246074945403946,
+      0.05165033666530847
+    ]
+  },
+  "finalist_confidence_margin": 0.0,
+  "finalist_holdout_distinctive": true,
+  "finalist_holdout_validation": [
+    {
+      "absolute_support_pass": true,
+      "ambiguous_competitor": false,
+      "candidate_index": 0,
+      "coverage": {
+        "edge_cell_ratio": 0.0,
+        "edge_cells": 0,
+        "edge_ratio": 0.0,
+        "nid_points": 0,
+        "nid_ratio": 0.0,
+        "visible_edges": 0
+      },
+      "holdout_objective": null,
+      "holdout_objective_margin_from_selected": 0.0,
+      "holdout_pass_ratio": 0.0,
+      "internal_gate_pass": false,
+      "minimum_required_objective_margin": 0.02,
+      "objective_components": {
+        "coverage": 1.0,
+        "direction_prior": 0.0,
+        "edge": 0.0,
+        "geometry_nid": 1.0,
+        "manhattan": 1.0,
+        "signal_nmi": 1.0,
+        "structural": 1.0
+      },
+      "objective_margin_sufficient": true,
+      "selected": true,
+      "separated_from_selected": false,
+      "training_pass_ratio": 1.0,
+      "validation": null,
+      "viable_competitor": false,
+      "yaw_deg": -152.00000000000003,
+      "yaw_distance_from_selected_deg": 0.0
+    },
+    {
+      "absolute_support_pass": false,
+      "ambiguous_competitor": false,
+      "candidate_index": 1,
+      "coverage": {
+        "edge_cell_ratio": 0.0,
+        "edge_cells": 0,
+        "edge_ratio": 0.0,
+        "nid_points": 0,
+        "nid_ratio": 0.0,
+        "visible_edges": 0
+      },
+      "holdout_objective": null,
+      "holdout_objective_margin_from_selected": -1.0,
+      "holdout_pass_ratio": 0.0,
+      "internal_gate_pass": false,
+      "minimum_required_objective_margin": 0.02,
+      "objective_components": {
+        "coverage": 1.0,
+        "direction_prior": 0.0,
+        "edge": 0.0,
+        "geometry_nid": 1.0,
+        "manhattan": 1.0,
+        "signal_nmi": 1.0,
+        "structural": 1.0
+      },
+      "objective_margin_sufficient": false,
+      "selected": false,
+      "separated_from_selected": true,
+      "training_pass_ratio": 1.0,
+      "validation": null,
+      "viable_competitor": false,
+      "yaw_deg": 3.0000000000000004,
+      "yaw_distance_from_selected_deg": 155.00000000000003
+    }
+  ],
+  "finalist_objective_margin": 1.0,
+  "focal_scale": 1.0,
+  "focal_scale_candidates": [
+    1.0
+  ],
+  "full_search_baseline": {
+    "basin_candidate_count": 2,
+    "basin_proposal_candidate": 0,
+    "bounded_internal_yaw_candidates": 38,
+    "bounded_orientation_evaluations": 10,
+    "bounded_projection_scene_evaluations": 38,
+    "corrected_alpha": 0.8,
+    "corrected_score_map": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/orientation_corrected_scores.csv",
+    "down_step_deg": 15.0,
+    "final_selected_candidate": 0,
+    "final_selected_down_deg": 39.58818616494307,
+    "final_selected_focal_scale": 1.0,
+    "final_selected_optical_roll_deg": 0.0,
+    "final_selected_yaw_deg": -152.00000000000003,
+    "maximum_camera_downward_deg": 75.0,
+    "minimum_structural_direction_groups": 2,
+    "neighbor_sigma_down_deg": 5.0,
+    "neighbor_sigma_yaw_deg": 5.0,
+    "orientation_analyzer": {
+      "consensus_down_tolerance_deg": 15.0,
+      "consensus_proposal_count": 3,
+      "consensus_yaw_tolerance_deg": 15.0,
+      "coverage": 0.9946039603960396,
+      "evaluated_signature_yaws": 360,
+      "expensive_projection_evaluations": 0,
+      "fallback_reason": "",
+      "fallback_required": false,
+      "mode": "hybrid",
+      "perspective_remaps": 0,
+      "proposals": [
+        {
+          "basin_score": 0.7574690008576256,
+          "confidence": 0.1448553398298648,
+          "down_deg": 18.0,
+          "down_sigma_deg": 5.491479493676594,
+          "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+          "rank": 1,
+          "raw_score": 0.7912097398015006,
+          "roll_deg": 4.270749589425234,
+          "roll_sigma_deg": 4.008918628686366,
+          "search_radius_deg": 9.391628032872179,
+          "yaw_deg": -60.0,
+          "yaw_sigma_deg": 4.695814016436089
+        },
+        {
+          "basin_score": 0.7389823797222999,
+          "confidence": 0.13415063606353914,
+          "down_deg": 32.0,
+          "down_sigma_deg": 3.54924732320195,
+          "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+          "rank": 2,
+          "raw_score": 0.7478208551049583,
+          "roll_deg": 4.270749589425234,
+          "roll_sigma_deg": 4.008918628686366,
+          "search_radius_deg": 9.087797801645848,
+          "yaw_deg": 16.0,
+          "yaw_sigma_deg": 4.543898900822924
+        },
+        {
+          "basin_score": 0.7274696362840931,
+          "confidence": 0.19926787083353759,
+          "down_deg": 44.0,
+          "down_sigma_deg": 4.411813835056934,
+          "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+          "rank": 3,
+          "raw_score": 0.768193139767551,
+          "roll_deg": 0.0,
+          "roll_sigma_deg": 10.0,
+          "search_radius_deg": 9.2146335743017,
+          "yaw_deg": -151.0,
+          "yaw_sigma_deg": 4.60731678715085
+        }
+      ],
+      "reference_scene_proposals": [
+        {
+          "basin_score": 0.7574690008576256,
+          "confidence": 0.1448553398298648,
+          "down_deg": 18.0,
+          "down_sigma_deg": 5.491479493676594,
+          "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+          "rank": 1,
+          "raw_score": 0.7912097398015006,
+          "roll_deg": 4.270749589425234,
+          "roll_sigma_deg": 4.008918628686366,
+          "search_radius_deg": 9.391628032872179,
+          "yaw_deg": -60.0,
+          "yaw_sigma_deg": 4.695814016436089
+        },
+        {
+          "basin_score": 0.7389823797222999,
+          "confidence": 0.13415063606353914,
+          "down_deg": 32.0,
+          "down_sigma_deg": 3.54924732320195,
+          "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+          "rank": 2,
+          "raw_score": 0.7478208551049583,
+          "roll_deg": 4.270749589425234,
+          "roll_sigma_deg": 4.008918628686366,
+          "search_radius_deg": 9.087797801645848,
+          "yaw_deg": 16.0,
+          "yaw_sigma_deg": 4.543898900822924
+        },
+        {
+          "basin_score": 0.7274696362840931,
+          "confidence": 0.19926787083353759,
+          "down_deg": 44.0,
+          "down_sigma_deg": 4.411813835056934,
+          "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+          "rank": 3,
+          "raw_score": 0.768193139767551,
+          "roll_deg": 0.0,
+          "roll_sigma_deg": 10.0,
+          "search_radius_deg": 9.2146335743017,
+          "yaw_deg": -151.0,
+          "yaw_sigma_deg": 4.60731678715085
+        }
+      ],
+      "runtime_ms": 13129.09079,
+      "scene_count": 1,
+      "scenes": [
+        {
+          "coverage": 0.9946039603960396,
+          "fallback_reason": "",
+          "fallback_required": false,
+          "proposals": [
+            {
+              "basin_score": 0.7574690008576256,
+              "confidence": 0.1448553398298648,
+              "down_deg": 18.0,
+              "down_sigma_deg": 5.491479493676594,
+              "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+              "rank": 1,
+              "raw_score": 0.7912097398015006,
+              "roll_deg": 4.270749589425234,
+              "roll_sigma_deg": 4.008918628686366,
+              "search_radius_deg": 9.391628032872179,
+              "yaw_deg": -60.0,
+              "yaw_sigma_deg": 4.695814016436089
+            },
+            {
+              "basin_score": 0.7389823797222999,
+              "confidence": 0.13415063606353914,
+              "down_deg": 32.0,
+              "down_sigma_deg": 3.54924732320195,
+              "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+              "rank": 2,
+              "raw_score": 0.7478208551049583,
+              "roll_deg": 4.270749589425234,
+              "roll_sigma_deg": 4.008918628686366,
+              "search_radius_deg": 9.087797801645848,
+              "yaw_deg": 16.0,
+              "yaw_sigma_deg": 4.543898900822924
+            },
+            {
+              "basin_score": 0.7274696362840931,
+              "confidence": 0.19926787083353759,
+              "down_deg": 44.0,
+              "down_sigma_deg": 4.411813835056934,
+              "evidence": "AZIMUTH_SIGNATURE,ELEVATION_SIGNATURE,GRAVITY_VP_CHECK,MANHATTAN_GATE",
+              "rank": 3,
+              "raw_score": 0.768193139767551,
+              "roll_deg": 0.0,
+              "roll_sigma_deg": 10.0,
+              "search_radius_deg": 9.2146335743017,
+              "yaw_deg": -151.0,
+              "yaw_sigma_deg": 4.60731678715085
+            }
+          ],
+          "runtime_ms": 13129.09079,
+          "scan": "calib-20260830-085829_sweep-000001_pan_tilt_lidar.json",
+          "scene_index": 0,
+          "status": "PROPOSALS_READY"
+        }
+      ],
+      "status": "PROPOSALS_READY"
+    },
+    "orientation_analyzer_engaged": true,
+    "orientation_analyzer_fallback_triggered": false,
+    "orientation_candidates": 6,
+    "orientation_layers": [],
+    "raw_best_down_deg": 39.58818616494307,
+    "raw_best_objective": 0.940350609578927,
+    "raw_best_yaw_deg": -152.00000000000003,
+    "reason": "yaw/down grid is not 1 degree over 360x90 degrees",
+    "score_map": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/orientation_full_search.csv",
+    "search_stages": [
+      {
+        "candidate_count": 6,
+        "mode": "hybrid",
+        "selection": "orientation_analyzer_proposals",
+        "stage": "analyzer_top3_seeds"
+      },
+      {
+        "internal_yaw_candidates": 18,
+        "radius_deg": 5.0,
+        "score_map": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/bounded_search_5deg_scores.csv",
+        "seed_count": 6,
+        "stage": "bounded_search_5deg",
+        "step_deg": 5.0,
+        "winner_count": 6,
+        "yaw_candidates_per_seed": 3
+      },
+      {
+        "internal_yaw_candidates": 14,
+        "radius_deg": 3.0,
+        "score_map": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/bounded_search_1deg_scores.csv",
+        "seed_count": 2,
+        "stage": "bounded_search_1deg",
+        "step_deg": 1.0,
+        "winner_count": 2,
+        "yaw_candidates_per_seed": 7
+      },
+      {
+        "candidate_index": 0,
+        "multi_criteria_confidence_score": 0.7675605109592898,
+        "seed_down_deg": 39.58818616494307,
+        "seed_roll_deg": 0.0,
+        "seed_yaw_deg": -152.00000000000003,
+        "stage": "analyzer_bounded_ceres_finalist"
+      },
+      {
+        "candidate_index": 1,
+        "multi_criteria_confidence_score": 0.5934541993509679,
+        "seed_down_deg": 12.508520506323407,
+        "seed_roll_deg": 4.270749589425234,
+        "seed_yaw_deg": 3.0000000000000004,
+        "stage": "analyzer_bounded_ceres_finalist"
+      },
+      {
+        "internal_yaw_candidates": 38,
+        "orientation_evaluations": 10,
+        "projection_scene_evaluations": 38,
+        "stage": "analyzer_bounded_engaged"
+      },
+      {
+        "ambiguous_separated_competitors": 0,
+        "candidate_count": 2,
+        "common_coverage_reference": {
+          "edge_cells": 0,
+          "nid_points": 0,
+          "visible_edges": 0
+        },
+        "distinctive": true,
+        "minimum_required_objective_margin": 0.02,
+        "minimum_separated_holdout_objective_margin": 1.0,
+        "passing_separated_competitors": 0,
+        "selected_holdout_objective": null,
+        "selected_holdout_pass_ratio": 0.0,
+        "selection_policy": "pass_ratio_tier_then_training_composite_objective_with_common_holdout_coverage_reference_and_minimum_margin",
+        "stage": "finalist_holdout_validation"
+      }
+    ],
+    "search_strategy": "staged",
+    "selected_basin_corrected_score": 0.9256836358446656,
+    "selected_basin_down_deg": 39.58818616494307,
+    "selected_basin_focal_scale": 1.0,
+    "selected_basin_optical_roll_deg": 0.0,
+    "selected_basin_yaw_deg": -152.00000000000003,
+    "selection_policy": "top3_distinct_yaw_contiguous_basins_then_5deg_then_1deg_then_up_to_3_ceres_with_scene_validation;_no_fallback",
+    "status": "NOT_A_1_DEGREE_FULL_SEARCH",
+    "step_size_benchmark_status": "NOT_REQUESTED",
+    "yaw_step_deg": 15.0
+  },
+  "global_max_nid_points": 513,
+  "global_max_visible_edges": 566,
+  "holdout_observation_count": 0,
+  "holdout_scene_validation": null,
+  "holdout_validation_pass": true,
+  "image_distortion_state": "raw",
+  "independent_product_approval_evidence": "required_outside_this_single_calibration_run",
+  "initial_intrinsics": {
+    "cx": 1337.029701465088,
+    "cy": 745.3700555812936,
+    "fx": 2033.9019520107618,
+    "fy": 2037.7796376946073,
+    "resolution": [
+      2592,
+      1520
+    ]
+  },
+  "input_pair_count": 1,
+  "input_pair_start": 0,
+  "internal_gate_status": "INTERNAL_GATE_FAIL",
+  "intrinsic_profile_id": "charuco-pass-clean18-20260814",
+  "intrinsics_source": "manual_intrinsic_fixed",
+  "joint_intrinsic_policy": "disabled_product_path",
+  "ldc_enabled": "false",
+  "limitations": [
+    "Manual camera intrinsic is used as the active fixed profile.",
+    "K+D are fixed from the supplied camera profile; joint K+RT is experimental and disabled unless explicitly enabled.",
+    "Lens distortion is not estimated; record and fix the camera LDC state during capture.",
+    "LDC/raw-versus-rectified state is explicit.",
+    "Corrected signal_strength NMI is diagnostic-only until the manual RT perturbation report passes.",
+    "INTERNAL_GATE_PASS is not activation; CANDIDATE_RT requires a holdout and PRODUCT_APPROVED_RT requires independent evidence."
+  ],
+  "manual_distortion_coefficients": [
+    -0.5653174394854492,
+    0.34459385610316223,
+    -0.0039145365522611315,
+    0.0008182748566205869,
+    -0.10809412486837452
+  ],
+  "manual_distortion_model": "opencv_radtan",
+  "manual_intrinsic_json": "/data/develop/manual_calibration/output/session-const-env/intrinsic/camera_intrinsic.json",
+  "manual_reference_comparison": null,
+  "manual_reference_json": null,
+  "manufacturer_fov_diagnostic": false,
+  "manufacturer_fov_range_deg": {
+    "horizontal": [
+      53.0,
+      100.0
+    ],
+    "vertical": [
+      30.0,
+      54.0
+    ]
+  },
+  "mechanical_installation_prior_t_camera_lidar": null,
+  "minimum_intrinsic_observations": 3,
+  "minimum_scene_direction_groups": 1,
+  "minimum_scene_pass_ratio": 1.0,
+  "minimum_separated_holdout_objective_margin": 1.0,
+  "mode": "real_geometry_nid_edge_multistart_manual_intrinsics_fixed",
+  "occlusion_handling": "z_buffer_nearest_surface_10mm",
+  "optical_roll_candidates_deg": [
+    0.0
+  ],
+  "pairing_basis": "lexicographic filename order supplied by operator",
+  "pairs": [
+    {
+      "camera_colored_points": 4070,
+      "colorized_obj": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar.obj",
+      "colorized_ply": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar.ply",
+      "colorized_z_up_obj": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar_z_up.obj",
+      "colorized_z_up_ply": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar_z_up.ply",
+      "colorized_z_up_reprojection_m_ply": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar_z_up_reprojection_m.ply",
+      "diagnostic_camera_center_lidar_m": [
+        5.716157198184385e-06,
+        -0.08105534667412403,
+        2.6400472210655335e-06
+      ],
+      "diagnostic_camera_center_viewer_z_up_m": [
+        5.716157198184385e-06,
+        2.6400472210655335e-06,
+        0.08105534667412403
+      ],
+      "diagnostic_camera_heading_viewer_z_up_deg": -62.89774725554617,
+      "diagnostic_camera_optical_axis_lidar": [
+        0.3548790431689338,
+        0.6270722025175881,
+        -0.6934272258494347
+      ],
+      "diagnostic_camera_optical_axis_viewer_z_up": [
+        0.3548790431689338,
+        -0.6934272258494347,
+        -0.6270722025175881
+      ],
+      "distortion_applied": true,
+      "image": "20260829_235811_CH1.jpg",
+      "image_distortion_state": "raw",
+      "matching_visualization": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/matching_scene_0.png",
+      "pointcloud_3d_preview": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar_3d_preview.png",
+      "pointcloud_3d_preview_frame": "viewer_z_up: +x right, +y forward, +z up",
+      "prepared_image": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/prepared/scene_0.png",
+      "preprocessing": {
+        "accepted": 39299,
+        "cells": 40400,
+        "coordinate_contract_status": "validated_from_frame_range_formula",
+        "coordinate_contract_warning": null,
+        "file": "calib-20260830-085829_sweep-000001_pan_tilt_lidar.json",
+        "frame_convention": "+x right, +y down, +z forward; pan+ right, tilt+ up",
+        "frame_handedness": "right",
+        "maximum_range_m": 20.0,
+        "measurement_tilt_reference": "scan.tilt_rad: zero=horizontal, negative=down",
+        "minimum_range_m": 0.3,
+        "minimum_signal": 1000.0,
+        "range_formula": "x=r*cos(tilt)*sin(pan); y=-r*sin(tilt); z=r*cos(tilt)*cos(pan)",
+        "range_offset_m": 0.084,
+        "range_offset_source": "json_header",
+        "rejected_invalid": 218,
+        "rejected_range": 826,
+        "rejected_signal": 57,
+        "schema_version": "1.2",
+        "source_duplicate_cell_diagnostic": 0,
+        "source_valid_count": 40182,
+        "tilt_zero_metadata": "nadir",
+        "tilt_zero_role": "mechanism_home_only"
+      },
+      "scan": "calib-20260830-085829_sweep-000001_pan_tilt_lidar.json",
+      "scene_index": 0,
+      "visualization_pose_source": "rejected_optimization_candidate",
+      "visualized_projected_points": 4070,
+      "vscode_viewer_mesh_obj": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar_viewer_mesh.obj",
+      "vscode_viewer_mesh_ply": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar_viewer_mesh.ply",
+      "vscode_viewer_z_up_mesh_obj": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar_z_up_viewer_mesh.obj",
+      "vscode_viewer_z_up_mesh_ply": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/scene_0_colorized_lidar_z_up_viewer_mesh.ply"
+    }
+  ],
+  "pan_direction_top_view": "increasing pan is clockwise (measured)",
+  "passing_separated_holdout_competitors": 0,
+  "pipeline_runtime_ms": 73986.855367,
+  "principal_y_offset_px": 0.0,
+  "prior_heading_image_roll_deg": [
+    0.0,
+    0.0
+  ],
+  "product_approved_rt_status": "NOT_PRODUCT_APPROVED_RT",
+  "profile_distortion_unknown": false,
+  "reason_code": "OBJECTIVE_IMPROVEMENT_INSUFFICIENT",
+  "reference_rt_perturbation": null,
+  "search_stages": [
+    {
+      "candidate_count": 6,
+      "mode": "hybrid",
+      "selection": "orientation_analyzer_proposals",
+      "stage": "analyzer_top3_seeds"
+    },
+    {
+      "internal_yaw_candidates": 18,
+      "radius_deg": 5.0,
+      "score_map": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/bounded_search_5deg_scores.csv",
+      "seed_count": 6,
+      "stage": "bounded_search_5deg",
+      "step_deg": 5.0,
+      "winner_count": 6,
+      "yaw_candidates_per_seed": 3
+    },
+    {
+      "internal_yaw_candidates": 14,
+      "radius_deg": 3.0,
+      "score_map": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/bounded_search_1deg_scores.csv",
+      "seed_count": 2,
+      "stage": "bounded_search_1deg",
+      "step_deg": 1.0,
+      "winner_count": 2,
+      "yaw_candidates_per_seed": 7
+    },
+    {
+      "candidate_index": 0,
+      "multi_criteria_confidence_score": 0.7675605109592898,
+      "seed_down_deg": 39.58818616494307,
+      "seed_roll_deg": 0.0,
+      "seed_yaw_deg": -152.00000000000003,
+      "stage": "analyzer_bounded_ceres_finalist"
+    },
+    {
+      "candidate_index": 1,
+      "multi_criteria_confidence_score": 0.5934541993509679,
+      "seed_down_deg": 12.508520506323407,
+      "seed_roll_deg": 4.270749589425234,
+      "seed_yaw_deg": 3.0000000000000004,
+      "stage": "analyzer_bounded_ceres_finalist"
+    },
+    {
+      "internal_yaw_candidates": 38,
+      "orientation_evaluations": 10,
+      "projection_scene_evaluations": 38,
+      "stage": "analyzer_bounded_engaged"
+    },
+    {
+      "ambiguous_separated_competitors": 0,
+      "candidate_count": 2,
+      "common_coverage_reference": {
+        "edge_cells": 0,
+        "nid_points": 0,
+        "visible_edges": 0
+      },
+      "distinctive": true,
+      "minimum_required_objective_margin": 0.02,
+      "minimum_separated_holdout_objective_margin": 1.0,
+      "passing_separated_competitors": 0,
+      "selected_holdout_objective": null,
+      "selected_holdout_pass_ratio": 0.0,
+      "selection_policy": "pass_ratio_tier_then_training_composite_objective_with_common_holdout_coverage_reference_and_minimum_margin",
+      "stage": "finalist_holdout_validation"
+    }
+  ],
+  "search_strategy": "staged",
+  "selected_candidate": 0,
+  "selected_candidate_camera_downward_deg": 38.83444375395635,
+  "selected_candidate_policy": "top3_distinct_yaw_contiguous_basins_then_5deg_then_1deg_then_up_to_3_ceres_significant_objective_else_TESL_training_scene_selection; no_fallback",
+  "selected_candidate_structural_direction_groups": 2,
+  "selected_downward_direction_deg": 39.58818616494307,
+  "selected_holdout_objective": null,
+  "selected_optical_roll_deg": 0.0,
+  "signal_nmi_manual_rt_perturbation": null,
+  "status": "FAIL",
+  "training_observation_count": 1,
+  "training_scene_validation": {
+    "csv": "/workspace/automatic_calibration/generated/v3_manual_reference_evaluation_20260830/v3/build50/training_scene_validation.csv",
+    "minimum_direction_groups": 1,
+    "pass_ratio": 1.0,
+    "passed_scenes": 1,
+    "scene_count": 1,
+    "scenes": [
+      {
+        "failures": [],
+        "pass": true,
+        "scene": 0
+      }
+    ]
+  },
+  "training_validation_pass": true,
+  "visualization_pose_source": "rejected_optimization_candidate",
+  "visualization_t_camera_lidar": {
+    "rotation_matrix": [
+      [
+        -0.8792998725846414,
+        -0.028124599031592395,
+        -0.47543742070008066
+      ],
+      [
+        -0.31763595324228555,
+        0.7784532482808801,
+        0.5414036769812443
+      ],
+      [
+        0.3548790431689338,
+        0.6270722025175881,
+        -0.6934272258494347
+      ]
+    ],
+    "translation_m": [
+      -0.0022733677310391056,
+      0.06309818423477229,
+      0.050827356900993124
+    ]
+  },
+  "zoom_focus_locked_during_capture": "true"
+}
