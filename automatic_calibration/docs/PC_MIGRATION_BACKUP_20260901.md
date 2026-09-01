@@ -67,7 +67,8 @@ auto_calib_pc_migration_20260901/
 │   ├── auto_calib_all_refs_20260901.bundle
 │   └── qt_all_refs_20260901.bundle
 ├── 02_docs_and_key_evidence/
-│   └── auto_calib_docs_key_evidence_20260901.zip
+│   ├── auto_calib_docs_key_evidence_20260901.zip
+│   └── auto_calib_numeric_results_20260901.tar.gz
 ├── 03_raw_and_manual_data/
 │   ├── develop_jenkins_capture_20260901.tar.gz
 │   ├── develop_real_calibration_20260901.tar.gz
@@ -78,6 +79,11 @@ auto_calib_pc_migration_20260901/
 ```
 
 Git bundle은 모든 커밋·브랜치를 복구하기 위한 오프라인 안전장치다. 원본 데이터 묶음은 Git에서 제외한 이미지, JSON, PCD와 manual calibration 산출물을 보존한다. working delta는 Git에 넣지 않은 외부 소스 복사본, 임시 진단 데이터와 로컬 스크립트를 보존한다.
+
+`auto_calib_numeric_results_20260901.tar.gz`는 generated 디렉터리 전체를 복사하지
+않고 JSON, CSV, log, Markdown, text 결과 9,000개 항목을 경로 보존 상태로 모은
+수치 증거 묶음이다. `/workspace/...`를 가리키던 중복 WSL 심볼릭 링크 22개는 제외했고,
+그 링크의 실제 입력 파일은 raw-data 묶음에 보존한다.
 
 ## 5. 의도적으로 전체 백업하지 않은 항목
 
