@@ -1,11 +1,17 @@
 # Automatic Calibration 현재 진행 현황
 
 작성일: 2026-08-13
-최종 수정일: 2026-08-24
+최종 수정일: 2026-08-27
 범위: Calibration Core, LiDAR JSON 변환, 2D–3D 매칭 진단, 고정환경 CH1 시험 및 제품 운용 정책
 
 날짜별 작업·문제·수정·잔여 이슈는
 [`DAILY_WORK_LOG.md`](DAILY_WORK_LOG.md)에서 관리한다.
+
+2026-08-27 V3 analyzer 이후 확인한 camera/LiDAR edge 의미 불일치, geometry NID의 한계,
+targetless 문헌 비교와 다음 구현 순서는
+[`CROSS_MODAL_EDGE_SCORING_ANALYSIS_AND_IMPLEMENTATION_PLAN_20260827.md`](CROSS_MODAL_EDGE_SCORING_ANALYSIS_AND_IMPLEMENTATION_PLAN_20260827.md)를
+기준으로 한다. 현재 결론은 search step 추가 축소보다 channel-separated fine score와
+관측성 gate를 먼저 구현하는 것이다.
 
 2026-08-24 finalist별 hold-out 재검증과 최신 판정은
 [`FINALIST_HOLDOUT_DISTINCTIVENESS_20260824.md`](FINALIST_HOLDOUT_DISTINCTIVENESS_20260824.md)를

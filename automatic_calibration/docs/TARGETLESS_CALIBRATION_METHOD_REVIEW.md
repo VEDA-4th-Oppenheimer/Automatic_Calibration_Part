@@ -1,12 +1,18 @@
 # Targetless LiDAR–Camera Calibration 방법 검토
 
 - 작성일: 2026-08-11
-- 최종 수정일: 2026-08-20
+- 최종 수정일: 2026-08-27
 - 적용 대상: PNM-C16083RVQ + TOFSense F2P pan-tilt 3D scan
 - 목표: 체커보드/ChArUco를 제품 실행 중 요구하지 않고, 사전 등록한 camera `K+D` profile로 LiDAR-camera extrinsic `R,t`를 추정
 
 > K+RT 공동 추정은 논문·후속 연구로는 유효하지만 현재 MVP 제품 경로에서는 보류한다.
 > 현재 운용 정책과 품질 상태 구분은 [`PRODUCT_CALIBRATION_POLICY.md`](PRODUCT_CALIBRATION_POLICY.md)를 따른다.
+
+> **2026-08-27 후속 재평가:** 현재 geometry NID는 LiDAR range/normal 변화량과 camera
+> gradient를 비교하며 실제 LiDAR intensity NID와 다르다. 단방향 nearest-edge와 합쳐진
+> edge channel의 구조적 한계, 문헌 대비 차이와 구현 순서는
+> [`CROSS_MODAL_EDGE_SCORING_ANALYSIS_AND_IMPLEMENTATION_PLAN_20260827.md`](CROSS_MODAL_EDGE_SCORING_ANALYSIS_AND_IMPLEMENTATION_PLAN_20260827.md)를
+> 우선한다.
 
 ## 1. 기존 edge-only 방식의 한계
 
@@ -93,6 +99,9 @@ Pandey 방식의 전제는 두 센서의 surface intensity 사이에 통계적 �
 - profile provenance, 관측 부족, NID 중첩·개선률 fail-safe
 - 결과 JSON에 intrinsic 출처, NID, 복합 목적함수, multi-start 지표 기록
 
+주의: 위 geometry NID는 구현 완료 상태이지만 제품 식별력은 입증되지 않았다. Koide/Pandey
+계열의 실제 LiDAR return intensity 기반 NID/MI와 동일한 것으로 해석하지 않는다.
+
 보류/미구현:
 
 - 자동 2D–3D correspondence와 PnP/RANSAC initialization
@@ -125,3 +134,4 @@ Pandey 방식의 전제는 두 센서의 surface intensity 사이에 통계적 �
 | 0.1 | 2026-08-11 | edge-only 대안, 논문 근거, 프로젝트 적용 우선순위 및 F2P signal conformance 조건 최초 작성 |
 | 0.2 | 2026-08-11 | depth/normal geometry NID, 360° yaw multi-start, 복합 목적함수 및 모호성 fail-safe 구현 상태 반영 |
 | 0.3 | 2026-08-20 | 제품 경로를 Manual ChArUco K+D 고정·RT 전용 추정으로 확정하고 K+RT 공동 추정을 후속 연구로 보류 |
+| 0.4 | 2026-08-27 | geometry NID와 실제 intensity NID의 차이, 교차 도메인 edge 점수 재설계 후속 문서 링크 추가 |
