@@ -1,93 +1,51 @@
-# 개발환경
+# Camera Calibration Workspace
 
-이 폴더가 Docker 컨테이너의 `/workspace`에 마운트된다. 소스 코드는
-`develop/` 아래에서 작성하고 빌드 결과는 Docker 볼륨 `/workspace-build`에
-저장한다.
+기존 CCTV 설치 후 발생하는 calibration 작업의 불편과 비용을 저가 1D LiDAR
+pan-tilt 장치로 줄일 수 있는지 개발·검증하는 workspace다.
 
-## 시작
+## 프로젝트 분리
 
-`develop` 폴더에서 실행한다.
+| 디렉터리 | 역할 | 현장 입력 | 주 출력 |
+|---|---|---|---|
+| `automatic_calibration/` | 제품 개발 경로: 자연 장면 기반 targetless camera–LiDAR extrinsic | Camera image + 1D LiDAR pan-tilt sweep | `T_camera_lidar` |
+| `manual_calibration/` | 저비용 현장 기준: Galaxy Tab S7 전체 화면 ChArUco를 촬영하는 2D image-only 방식 + 태블릿 geometry 기반 RT 진단 확장 | Tab S7 ChArUco camera images; RT 진단 시 LiDAR JSON/PCD | Camera intrinsic, `T_camera_marker_board`, 독립/예비 `T_camera_lidar` |
+| `top_view_gui/` | Automatic/Manual 공용 RT 소비 및 기준평면 Top-View Qt GUI | Camera image + intrinsic + RT + 선택적 plane RT | Top-View PNG + metadata |
 
-```bash
-docker compose up -d --build
-docker compose exec dev verify-dev-env
-docker compose exec dev bash
-```
+Manual Marker 결과는 Automatic optimizer의 입력이나 성공 gate로 사용하지 않는다.
+두 pose의 child frame이 다르므로 marker image만으로 `T_camera_lidar`와 직접 비교할
+수 없다. 독립적으로 실측한 `T_lidar_marker_board`가 있을 때 최종 기준 비교를 수행한다.
+태블릿 display plane과 board geometry를 이용한 RT는 빠른 진단/실데이터 검증용
+예비값으로 별도 표시한다.
 
-## 빌드 및 테스트
-
-```bash
-docker compose exec dev cmake \
-  -S /workspace -B /workspace-build -G Ninja
-docker compose exec dev cmake --build /workspace-build
-docker compose exec dev ctest \
-  --test-dir /workspace-build --output-on-failure
-```
-
-## 종료
+## Ubuntu native 시작
 
 ```bash
-docker compose stop
+./scripts/install-ubuntu-deps.sh
+./scripts/verify-dev-env.sh
 ```
 
-컨테이너만 제거하고 빌드 볼륨은 유지하려면 다음을 실행한다.
+## Ubuntu native 전체 빌드와 테스트
 
 ```bash
-docker compose down
+cmake -S . -B build -G Ninja
+cmake --build build
+ctest --test-dir build --output-on-failure
 ```
 
-`docker compose down --volumes`는 빌드 결과와 셸 기록까지 삭제하므로 필요한
-경우에만 사용한다.
+실행 파일은 `build/bin`에 생성된다. `Dockerfile`과 `compose.yaml`은 로컬 개발용
+보조 환경이며 Git 저장소의 기본 실행 경로가 아니다.
 
-OpenSDK 크로스 컴파일 시에는 공식 `opensdk:26.05.19` 이미지와
-`SOC=cv5` 설정을 별도 구성해야 한다. 이 환경은 호스트 측 알고리즘 개발과
-단위 테스트를 위한 Ubuntu native 환경이다.
-
-## Stanford 합성 pan-tilt scan 생성
-
-`area_1`은 기본적으로 컨테이너의 `/datasets/stanford2d3ds/area_1`에 읽기 전용 마운트된다. 경로가 다르면 `.env.example`을 `.env`로 복사해 수정한다.
-
-```bash
-docker compose exec dev /workspace-build/generate_synthetic_scan \
-  --dataset-root /datasets/stanford2d3ds/area_1 \
-  --output /workspace/generated/area1_smoke \
-  --columns 321 --rows 121 --pixel-stride 2 \
-  --tx-m 0.15 --ty-m -0.02 --tz-m 0.08 \
-  --roll-deg 2 --pitch-deg -4 --yaw-deg 6 \
-  --noise-stddev-m 0.005 --dropout 0.01 --seed 7
-```
-
-설계와 한계는 [`docs/SYNTHETIC_DATA_ARCHITECTURE.md`](docs/SYNTHETIC_DATA_ARCHITECTURE.md)를 참조한다.
-
-## Calibration Core
-
-단일 장면 smoke test와 다중 장면 공동 최적화를 제공한다. 최종 보정 검증에는 다중 장면 사용을 권장한다.
-
-```bash
-docker compose exec -T dev /workspace-build/run_synthetic_calibration --help
-docker compose exec -T dev /workspace-build/run_multi_synthetic_calibration --help
-```
-
-API, 좌표계, 품질 게이트, Stanford 검증 결과와 실제 actuator 연결 경계는 [`docs/CALIBRATION_CORE_ARCHITECTURE.md`](docs/CALIBRATION_CORE_ARCHITECTURE.md)를 참조한다.
-
-## Calibration 결과 시각화
-
-다중 장면 calibration 결과를 원본 RGB, 초기 mechanical prior 투영, 보정된 extrinsic 투영으로 확인할 수 있다.
-
-```bash
-docker compose exec -T dev /workspace-build/render_calibration_visualization \
-  --dataset-root /datasets/stanford2d3ds/area_1 \
-  --result-json /workspace/generated/calibration_core_multi_validation/calibration_result.json \
-  --output /workspace/generated/calibration_core_multi_validation/visualization
-```
-
-생성 파일:
-
-- `original_rgb.png`
-- `initial_pointcloud_overlay.png`
-- `calibrated_pointcloud_overlay.png`
-- `calibration_comparison.png`
-- `visualization_summary.json`
-- `pointcloud_lidar.ply` / `pointcloud_lidar.obj` (lidar_scan 좌표계)
-- `pointcloud_calibrated_camera.ply` / `pointcloud_calibrated_camera.obj` (camera_optical 좌표계)
-# Automatic_Calibration_Part
+- Automatic 사용법: [`automatic_calibration/README.md`](automatic_calibration/README.md)
+- OpenSDK RT 통합 인계서: [`automatic_calibration/docs/OPENSDK_RT_INTEGRATION_HANDOFF.md`](automatic_calibration/docs/OPENSDK_RT_INTEGRATION_HANDOFF.md)
+- Automatic MVP 제품 운용 정책: [`automatic_calibration/docs/PRODUCT_CALIBRATION_POLICY.md`](automatic_calibration/docs/PRODUCT_CALIBRATION_POLICY.md)
+- Automatic 최신 finalist hold-out 식별성 보고서(2026-08-24): [`automatic_calibration/docs/FINALIST_HOLDOUT_DISTINCTIVENESS_20260824.md`](automatic_calibration/docs/FINALIST_HOLDOUT_DISTINCTIVENESS_20260824.md)
+- Automatic 로직 평가·개선 이력(2026-08-23): [`automatic_calibration/docs/CALIBRATION_LOGIC_EVALUATION_AND_IMPROVEMENT_20260823.md`](automatic_calibration/docs/CALIBRATION_LOGIC_EVALUATION_AND_IMPROVEMENT_20260823.md)
+- Calibration Core 구현 변경 기록(2026-08-20): [`automatic_calibration/docs/CALIBRATION_CORE_IMPLEMENTATION_CHANGELOG_20260820.md`](automatic_calibration/docs/CALIBRATION_CORE_IMPLEMENTATION_CHANGELOG_20260820.md)
+- Automatic 현재 진행 현황: [`automatic_calibration/docs/CURRENT_PROGRESS_AND_STATUS.md`](automatic_calibration/docs/CURRENT_PROGRESS_AND_STATUS.md)
+- 2026-08-18 CH1 고정환경 데이터 기록: [`automatic_calibration/docs/CH1_FIXED_ENVIRONMENT_DATA_RECORD_20260818.md`](automatic_calibration/docs/CH1_FIXED_ENVIRONMENT_DATA_RECORD_20260818.md)
+- Manual 결과를 Automatic prior/reference로 사용하는 방법: [`automatic_calibration/docs/MANUAL_REFERENCE_PRIOR_WORKFLOW.md`](automatic_calibration/docs/MANUAL_REFERENCE_PRIOR_WORKFLOW.md)
+- Manual Marker 사용법: [`manual_calibration/docs/USAGE.md`](manual_calibration/docs/USAGE.md)
+- session-const-env 작업 기록: [`manual_calibration/docs/SESSION_CONST_ENV_CALIBRATION_RECORD.md`](manual_calibration/docs/SESSION_CONST_ENV_CALIBRATION_RECORD.md)
+- 비교 프로토콜: [`manual_calibration/docs/COMPARISON_PROTOCOL.md`](manual_calibration/docs/COMPARISON_PROTOCOL.md)
+- 공용 Top-View GUI: [`top_view_gui/README.md`](top_view_gui/README.md)
+- 개발환경 가이드: [`docs/DEVELOPMENT_ENVIRONMENT.md`](docs/DEVELOPMENT_ENVIRONMENT.md)

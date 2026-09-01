@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "session_id": "site-001-manual-01",
+  "method": "manual_marker_2d_image",
+  "operator_count": 2,
+  "setup_seconds": 900,
+  "capture_seconds": 600,
+  "compute_seconds": 30,
+  "input_count": 20,
+  "retry_count": 1,
+  "target_required": true,
+  "success": true,
+  "notes": "Example values only; record actual site measurements."
+}

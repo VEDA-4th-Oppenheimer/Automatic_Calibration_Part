@@ -1,0 +1,399 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/schemas/pan_tilt_lidar_scan.schema.json",
+  "title": "1D LiDAR Pan-Tilt Sweep",
+  "description": "One complete organized sweep produced by the TOFSense F2P and pan-tilt actuator adapter.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "session_id",
+    "sensor",
+    "frames",
+    "units",
+    "clock",
+    "scan",
+    "measurements",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "session_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "sensor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "model",
+        "serial_number",
+        "firmware_version",
+        "interface",
+        "baud_rate"
+      ],
+      "properties": {
+        "model": {
+          "const": "TOFSense F2P"
+        },
+        "serial_number": {
+          "type": "string"
+        },
+        "firmware_version": {
+          "type": "string"
+        },
+        "interface": {
+          "const": "UART"
+        },
+        "baud_rate": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "frames": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "point_cloud_frame",
+        "camera_frame",
+        "convention"
+      ],
+      "properties": {
+        "point_cloud_frame": {
+          "const": "lidar_scan"
+        },
+        "camera_frame": {
+          "const": "camera_optical"
+        },
+        "convention": {
+          "const": "+x right, +y down, +z forward; pan positive right; tilt positive up"
+        }
+      }
+    },
+    "units": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "distance",
+        "angle",
+        "timestamp",
+        "device_time",
+        "signal_strength"
+      ],
+      "properties": {
+        "distance": {
+          "const": "meter"
+        },
+        "angle": {
+          "const": "radian"
+        },
+        "timestamp": {
+          "const": "nanosecond"
+        },
+        "device_time": {
+          "const": "millisecond"
+        },
+        "signal_strength": {
+          "const": "raw_uint16"
+        }
+      }
+    },
+    "clock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "time_base",
+        "host_clock",
+        "max_sync_error_ns"
+      ],
+      "properties": {
+        "time_base": {
+          "enum": [
+            "host_monotonic",
+            "ptp",
+            "hardware_trigger"
+          ]
+        },
+        "host_clock": {
+          "type": "string",
+          "minLength": 1
+        },
+        "device_to_host_offset_ns": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "max_sync_error_ns": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "scan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scan_id",
+        "started_at_ns",
+        "ended_at_ns",
+        "rows",
+        "columns",
+        "pan_min_rad",
+        "pan_max_rad",
+        "tilt_min_rad",
+        "tilt_max_rad",
+        "ordering",
+        "row_direction",
+        "column_direction",
+        "pattern",
+        "motion_direction",
+        "sample_count",
+        "valid_count"
+      ],
+      "properties": {
+        "scan_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "started_at_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ended_at_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rows": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "columns": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "pan_min_rad": {
+          "type": "number"
+        },
+        "pan_max_rad": {
+          "type": "number"
+        },
+        "tilt_min_rad": {
+          "type": "number"
+        },
+        "tilt_max_rad": {
+          "type": "number"
+        },
+        "ordering": {
+          "const": "row_major"
+        },
+        "row_direction": {
+          "const": "tilt_max_to_min"
+        },
+        "column_direction": {
+          "const": "pan_min_to_max"
+        },
+        "pattern": {
+          "enum": [
+            "raster_unidirectional",
+            "raster_bidirectional"
+          ]
+        },
+        "motion_direction": {
+          "enum": [
+            "forward",
+            "reverse",
+            "mixed"
+          ]
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "valid_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "mechanical": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "pan_zero_offset_rad",
+        "tilt_zero_offset_rad",
+        "backlash_compensated"
+      ],
+      "properties": {
+        "pan_zero_offset_rad": {
+          "type": "number"
+        },
+        "tilt_zero_offset_rad": {
+          "type": "number"
+        },
+        "backlash_compensated": {
+          "type": "boolean"
+        }
+      }
+    },
+    "measurements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/measurement"
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "received_frame_count",
+        "checksum_error_count",
+        "status_invalid_count",
+        "encoder_interpolation_error_count",
+        "dropped_frame_count"
+      ],
+      "properties": {
+        "received_frame_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "checksum_error_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status_invalid_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "encoder_interpolation_error_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "dropped_frame_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    }
+  },
+  "$defs": {
+    "measurement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "row",
+        "column",
+        "timestamp_ns",
+        "device_time_ms",
+        "encoder_timestamp_ns",
+        "pan_rad",
+        "tilt_rad",
+        "pan_encoder_count",
+        "tilt_encoder_count",
+        "distance_m",
+        "distance_status",
+        "signal_strength",
+        "range_precision_m",
+        "checksum_valid",
+        "interpolation_valid",
+        "valid",
+        "quality_flags"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "row": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "column": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "timestamp_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "device_time_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "encoder_timestamp_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pan_rad": {
+          "type": "number"
+        },
+        "tilt_rad": {
+          "type": "number"
+        },
+        "pan_encoder_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tilt_encoder_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "distance_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "distance_status": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "signal_strength": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "range_precision_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "checksum_valid": {
+          "type": "boolean"
+        },
+        "interpolation_valid": {
+          "type": "boolean"
+        },
+        "valid": {
+          "type": "boolean"
+        },
+        "quality_flags": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "VALID_RANGE",
+              "CHECKSUM_ERROR",
+              "DISTANCE_STATUS_INVALID",
+              "OUT_OF_RANGE",
+              "SIGNAL_SATURATED",
+              "ENCODER_INTERPOLATION_INVALID",
+              "ACTUATOR_ACCELERATION",
+              "ACTUATOR_DIRECTION_CHANGE",
+              "MOTOR_FAULT",
+              "SYNTHETIC_MEASUREMENT"
+            ]
+          }
+        }
+      }
+    }
+  }
+}

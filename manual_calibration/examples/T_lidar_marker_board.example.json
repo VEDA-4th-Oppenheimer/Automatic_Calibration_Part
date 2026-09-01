@@ -1,0 +1,11 @@
+{
+  "schema_version": "1.0",
+  "transform": {
+    "parent_frame": "lidar_scan",
+    "child_frame": "marker_board",
+    "convention": "p_parent = R_parent_child * p_child + t_parent_child",
+    "rotation_matrix": [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]],
+    "translation_m": [0.0, 0.0, 0.0]
+  },
+  "warning": "Replace with an independently measured jig or survey transform. Do not derive this from the Automatic result."
+}
